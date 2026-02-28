@@ -1,0 +1,62 @@
+# =============================================================================
+# ros2_control DiffDriveController — Daniel's Robot (LattePanda Alpha)
+# =============================================================================
+# NOTE: This config is for simulation use with ros2_control.
+# On real hardware, odometry/motor control is handled by diff_drive_node.py
+# communicating with the Arduino Leonardo over USB serial.
+# This file is kept for reference and potential future ros2_control integration.
+# =============================================================================
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    use_sim_time: true
+
+    diff_cont:
+      type: diff_drive_controller/DiffDriveController
+
+    joint_broad:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+
+diff_cont:
+  ros__parameters:
+    publish_rate: 30.0
+
+    base_frame_id: base_link
+    odom_frame_id: odom
+
+    left_wheel_names: ['left_wheel_joint']
+    right_wheel_names: ['right_wheel_joint']
+
+    # Must match URDF: center-to-center wheel separation
+    wheel_separation: 0.181
+    # Must match URDF: 69mm diameter wheels → 0.0345m radius
+    wheel_radius: 0.0345
+
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    open_loop: false
+    enable_odom_tf: true
+    position_feedback: true
+
+    pose_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+
+    # Velocity limits matching 130 RPM DC motors with 69mm wheels
+    # Max linear speed: 130/60 * π * 0.069 ≈ 0.47 m/s
+    linear.x.has_velocity_limits: true
+    linear.x.has_acceleration_limits: true
+    linear.x.max_velocity: 0.47
+    linear.x.min_velocity: -0.47
+    linear.x.max_acceleration: 1.0
+    linear.x.min_acceleration: -1.0
+
+    angular.z.has_velocity_limits: true
+    angular.z.has_acceleration_limits: true
+    angular.z.max_velocity: 2.5
+    angular.z.min_velocity: -2.5
+    angular.z.max_acceleration: 3.0
+    angular.z.min_acceleration: -3.0

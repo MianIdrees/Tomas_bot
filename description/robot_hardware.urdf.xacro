@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
+
+  <!-- Real hardware robot URDF — no Gazebo plugins -->
+
+  <xacro:include filename="robot_core.xacro" />
+  <xacro:include filename="lidar_hardware.xacro" />
+  <!-- Camera not used for navigation on real hardware (optional) -->
+  <!-- <xacro:include filename="camera.xacro" /> -->
+
+</robot>

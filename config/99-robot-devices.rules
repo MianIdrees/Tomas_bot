@@ -1,0 +1,28 @@
+# =============================================================================
+# udev rules for RPLidar C1 and Arduino Leonardo (LattePanda Alpha)
+# =============================================================================
+# Install on LattePanda Alpha:
+#   sudo cp 99-robot-devices.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# This creates stable symlinks:
+#   /dev/rplidar  → RPLidar C1
+#   /dev/arduino  → Arduino Leonardo (built-in on LattePanda Alpha)
+#
+# To find your device attributes, plug in one device at a time and run:
+#   udevadm info -a -n /dev/ttyUSB0 | grep -E 'idVendor|idProduct|serial'
+#   udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct|serial'
+#
+# NOTE: The built-in Arduino Leonardo on LattePanda appears as /dev/ttyACM*
+#       (not /dev/ttyUSB*) because it uses USB CDC (native USB).
+# =============================================================================
+
+# RPLidar C1 (Silicon Labs CP210x — typical vendor/product IDs)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="rplidar", MODE="0666"
+
+# Arduino Leonardo (ATmega32U4 — Arduino SA vendor ID)
+# LattePanda built-in Leonardo typically uses these IDs
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="8036", SYMLINK+="arduino", MODE="0666"
+# Alternative Leonardo ID (some boards use 0036 instead of 8036)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0036", SYMLINK+="arduino", MODE="0666"

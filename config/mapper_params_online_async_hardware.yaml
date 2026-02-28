@@ -1,0 +1,84 @@
+# =============================================================================
+# SLAM Toolbox Parameters — Real Hardware (LattePanda Alpha + RPLidar C1)
+# =============================================================================
+# Robot: Daniel's differential drive (130 RPM motors, 69mm wheels)
+# Computer: LattePanda Alpha (Core i5, 7.6 GB RAM — memory constrained)
+# LiDAR: RPLidar C1 (USB, ~10 Hz scan rate)
+# =============================================================================
+# TUNING NOTES:
+#   - This system has only ~300 MB free RAM during full SLAM+RViz operation.
+#   - Parameters are tuned to prevent slam_toolbox from crashing under load.
+#   - If map quality is poor, try reducing throttle_scans or minimum_time_interval.
+# =============================================================================
+
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+
+    # Frame configuration
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    mode: mapping
+
+    # Solver
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # Map resolution
+    resolution: 0.05
+    max_laser_range: 8.0        # RPLidar C1 practical indoor range
+    minimum_time_interval: 0.5  # [TUNING] Seconds between processed scans (was 0.2 — reduced to lower CPU/memory)
+    transform_timeout: 0.5      # Increased for real hardware latency
+    tf_buffer_duration: 15.0    # Reduced from 30s to save memory
+
+    # Scan matching — these control how often new scans are added to the map
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1   # [TUNING] Meters moved before inserting a new scan
+    minimum_travel_heading: 0.15   # [TUNING] Radians rotated before inserting a new scan
+
+    # Scan buffer — reduced for memory-constrained system
+    scan_buffer_size: 10           # [TUNING] Was 20 — reduced to save memory
+    scan_buffer_maximum_scan_distance: 8.0
+    link_match_minimum_response_fine: 0.15  # [TUNING] Min match quality to link scans
+    link_scan_maximum_distance: 1.0         # [TUNING] Max distance between linked scans
+
+    # Loop closure
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.40
+
+    # Correlation search — how far scan matcher searches to correct odometry drift
+    correlation_search_space_dimension: 0.5   # [TUNING] Was 0.75 — reduced search space for less CPU/memory
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # Loop search — reduced from 8.0 to save memory
+    loop_search_space_dimension: 4.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # Variance penalties
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+
+    # Performance tuning for LattePanda Alpha (Core i5, 7.6 GB RAM)
+    # WARNING: System has ~300 MB free RAM during SLAM. Keep resource usage low.
+    throttle_scans: 2              # Process every other scan (was 1 — halves CPU/memory)
+    transform_publish_period: 0.1  # 10 Hz TF publish (was 0.04 = 25 Hz — reduces TF flood)
+
+    map_update_interval: 5.0       # Seconds between map updates (was 3.0 — less frequent saves CPU)
+    enable_interactive_mode: true
+
+    stack_size_to_use: 20000000    # 20 MB stack (was 40 MB — halved to reduce memory)

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!--
+    RPLidar C1 — Real Hardware Link/Joint
+
+    Physical placement on Daniel's robot:
+      - At the front of the chassis, above the caster wheel
+      - Centered laterally (y = 0)
+      - Mounted on a wooden riser above the chassis, ~0.10m above base_link
+      - Yaw rotated 180° (π rad) because the RPLidar C1 connector faces backward
+        on the robot, so its internal 0° points rearward — the yaw flips it to
+        align with the robot's +X forward direction.
+  -->
+
+  <joint name="laser_joint" type="fixed">
+    <parent link="chassis"/>
+    <child link="laser_frame"/>
+    <origin xyz="0.36 0 0.10" rpy="0 0 ${pi}"/>
+  </joint>
+
+  <link name="laser_frame">
+    <visual>
+      <geometry>
+        <cylinder length="0.04" radius="0.035"/>
+      </geometry>
+      <material name="red">
+        <color rgba="1 0 0 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="0.04" radius="0.035"/>
+      </geometry>
+    </collision>
+    <xacro:inertial_cylinder mass="0.15" length="0.04" radius="0.035">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </xacro:inertial_cylinder>
+  </link>
+
+  <!-- No Gazebo sensor plugin — real RPLidar C1 provides /scan topic -->
+
+</robot>
