@@ -15,6 +15,7 @@ Complete step-by-step guide for building, teleoperation, SLAM mapping, and auton
 - [x] RPLidar C1 connected via USB → `/dev/rplidar`
 - [x] Arduino Leonardo connected → `/dev/arduino`
 - [x] 12V battery connected to L298N
+- [x] (Optional) PS3-style 2.4GHz wireless gamepad + USB dongle for joystick control
 
 ---
 
@@ -94,6 +95,129 @@ When teleop starts, the default speeds are displayed. Use these keys to adjust:
 | `c` | **Increase** angular (turning) speed |
 
 > **IMPORTANT for mapping:** Press `z` several times until linear speed is **0.10–0.15 m/s** and press `e` until angular speed is **0.3–0.5 rad/s**. Slow driving = clean maps!
+
+---
+
+## 3b. Teleoperation (PS3-Style Gamepad / Joystick)
+
+Use the generic PS3-style 2.4GHz wireless gamepad for proportional analog control.
+
+### One-time Setup
+
+```bash
+# Install the ROS2 joy driver
+sudo apt install ros-jazzy-joy
+
+# Make the joystick script executable (if not already)
+chmod +x ~/robot_ws/src/Tomas_bot/scripts/joystick_teleop_node.py
+
+# Rebuild (after first install only)
+cd ~/robot_ws && colcon build --symlink-install && source install/setup.bash
+```
+
+### Verify Controller is Detected
+
+1. Plug the **2.4GHz USB dongle** into the LattePanda (or your PC)
+2. Turn on the gamepad (LED should light up to confirm pairing)
+3. Check the device:
+
+```bash
+ls /dev/input/js*          # Should show /dev/input/js0
+jstest /dev/input/js0      # Move sticks/press buttons to see raw values (Ctrl+C to exit)
+```
+
+> **Tip:** If `jstest` is not installed: `sudo apt install joystick`
+
+### Launch Joystick Teleop
+
+With bringup running (Step 2):
+
+```bash
+# Terminal 2 — Joystick teleop (keep running while driving)
+source ~/robot_ws/install/setup.bash
+ros2 launch Tomas_bot joystick_teleop.launch.py
+```
+
+### Controller Layout & Controls
+
+```
+              ┌────────────────────────────────────────┐
+              │           PS3-Style Gamepad             │
+              │                                        │
+              │    [L2]                        [R2]    │
+              │    [L1]  ← ENABLE    TURBO →  [R1]    │
+              │                                        │
+              │     ┌─┐     [Select] [Start]    (△)    │
+              │     │↑│                       (□) (○)  │
+              │   ┌─┼─┼─┐                      (✕)    │
+              │   │←│ │→│           ◉                  │
+              │   └─┼─┼─┘     ◉   RIGHT               │
+              │     │↓│       LEFT  STICK              │
+              │     └─┘       STICK                    │
+              │            (forward/back)  (turn L/R)  │
+              └────────────────────────────────────────┘
+```
+
+| Control | Input | Action |
+|---------|-------|--------|
+| **Forward / Backward** | Left Stick ↑↓ | Proportional linear velocity (push more = go faster) |
+| **Turn Left / Right** | Right Stick ←→ | Proportional angular velocity (push more = turn faster) |
+| **Enable (Deadman)** | **Hold L1** | **MUST hold to drive** — robot stops instantly when released |
+| **Turbo Mode** | Hold L1 + R1 | Full speed (0.47 m/s linear, 2.5 rad/s angular) |
+| **Normal Mode** | Hold L1 only | Half speed (0.24 m/s linear, 1.25 rad/s angular) |
+| **Emergency Stop** | Press Start | Immediately stops robot; press L1 again to resume |
+
+### Speed Modes
+
+| Mode | Linear Speed | Angular Speed | How to Activate |
+|------|-------------|---------------|-----------------|
+| **Stopped** | 0 m/s | 0 rad/s | Release L1 (or press Start) |
+| **Normal** | up to 0.24 m/s | up to 1.25 rad/s | Hold L1 + move sticks |
+| **Turbo** | up to 0.47 m/s | up to 2.50 rad/s | Hold L1 + R1 + move sticks |
+
+> **For SLAM mapping:** Use Normal mode (L1 only) and push the stick gently (~30%) for slow, clean maps.
+
+### If Your Controller Mapping is Different
+
+Generic PS3 controllers vary between manufacturers. If the sticks or buttons don't match:
+
+1. **Identify your mapping:**
+   ```bash
+   # Run jstest and move each stick / press each button
+   jstest /dev/input/js0
+   ```
+   Note which axis number changes when you push each stick, and which button number lights up.
+
+2. **Edit the config file:** `config/joystick_params.yaml`
+   ```yaml
+   joystick_teleop_node:
+     ros__parameters:
+       linear_axis: 1        # Change to YOUR left stick Y axis number
+       angular_axis: 2       # Change to YOUR right stick X axis number
+       enable_button: 4      # Change to YOUR L1 button number
+       turbo_button: 5       # Change to YOUR R1 button number
+       estop_button: 9       # Change to YOUR Start button number
+       linear_axis_inverted: true   # Set false if forward = positive already
+       angular_axis_inverted: false # Set true if left = positive already
+   ```
+
+3. **Rebuild and relaunch:**
+   ```bash
+   cd ~/robot_ws && colcon build --symlink-install && source install/setup.bash
+   ros2 launch Tomas_bot joystick_teleop.launch.py
+   ```
+
+### Troubleshooting Joystick
+
+| Problem | Solution |
+|---------|----------|
+| No `/dev/input/js0` | Check USB dongle is plugged in; try different USB port |
+| Controller not pairing | Turn off gamepad, wait 5s, turn back on; re-plug USB dongle |
+| Sticks work but robot doesn't move | **Are you holding L1?** (deadman switch required) |
+| Robot moves wrong direction | Edit `config/joystick_params.yaml` — flip `linear_axis_inverted` or `angular_axis_inverted` |
+| Sticks mapped to wrong function | Run `jstest` to find correct axis numbers, update config |
+| Robot stutters or jerks | Increase `stick_deadzone` to 0.15 in config |
+| No `/joy` topic | `ros2 topic list \| grep joy` — if missing, check joy_node is running |
 
 ---
 
@@ -217,6 +341,13 @@ ros2 launch Tomas_bot bringup_hardware.launch.py
 # For mapping use: ~0.10–0.15 m/s linear, ~0.3–0.5 rad/s angular
 # ──────────────────────────────────────────────────────────
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+# ──────────────────────────────────────────────────────────
+# JOYSTICK TELEOP (Terminal 2 — PS3 gamepad driving)
+# Hold L1 to enable, L1+R1 for turbo, Start for E-stop
+# Left Stick Y = forward/back, Right Stick X = turn
+# ──────────────────────────────────────────────────────────
+ros2 launch Tomas_bot joystick_teleop.launch.py
 
 # ──────────────────────────────────────────────────────────
 # SLAM MAPPING + RVIZ2 (Terminal 3 — build a map while driving)

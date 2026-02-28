@@ -1,0 +1,67 @@
+# =============================================================================
+# Joystick Teleop Configuration — Generic PS3-style 2.4GHz Wireless Gamepad
+# =============================================================================
+# Controller: Generic PS3-style gamepad with 2.4GHz USB wireless receiver
+# Connection: USB dongle → /dev/input/js0 (auto-detected by joy_node)
+#
+# This file configures both the ROS2 joy_node (driver) and the
+# joystick_teleop_node (velocity mapper) for Tomas_bot.
+#
+# ─── HOW TO VERIFY YOUR CONTROLLER MAPPING ────────────────────────────
+# 1. Plug in the USB dongle
+# 2. Check device:  ls /dev/input/js*
+# 3. Test mapping:  jstest /dev/input/js0
+#    → Move each stick, press each button, note the axis/button numbers
+# 4. Update axis_linear / axis_angular / enable_button etc. below
+#    if your controller differs from the defaults
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# joy_node — Linux joystick driver (reads /dev/input/js0 → publishes /joy)
+# ─────────────────────────────────────────────────────────────────────────────
+joy_node:
+  ros__parameters:
+    device_id: 0                    # /dev/input/js0 (change if >1 controller)
+    deadzone: 0.05                  # Hardware deadzone (raw axis filter)
+    autorepeat_rate: 20.0           # Publish rate when no new events (Hz)
+    coalesce_interval_ms: 1         # Minimum ms between event reads
+
+# ─────────────────────────────────────────────────────────────────────────────
+# joystick_teleop_node — Converts /joy → /cmd_vel for Tomas_bot
+# ─────────────────────────────────────────────────────────────────────────────
+joystick_teleop_node:
+  ros__parameters:
+    # ── Speed Limits (match diff_drive_node hardware max) ──
+    max_linear_speed: 0.47          # m/s — 130 RPM motor hardware max
+    max_angular_speed: 2.5          # rad/s — physical turning max
+
+    # ── Normal Mode (L1 held) — safe indoor speed ──
+    normal_linear_scale: 0.5        # 50% → 0.24 m/s
+    normal_angular_scale: 0.5       # 50% → 1.25 rad/s
+
+    # ── Turbo Mode (L1 + R1 held) — full speed ──
+    turbo_linear_scale: 1.0         # 100% → 0.47 m/s
+    turbo_angular_scale: 1.0        # 100% → 2.5 rad/s
+
+    # ── Axis Mapping ──
+    # Generic PS3 2.4GHz controller (most common):
+    #   Axis 0 = Left Stick X    Axis 2 = Right Stick X
+    #   Axis 1 = Left Stick Y    Axis 3 = Right Stick Y
+    linear_axis: 1                  # Left Stick Y → forward/backward
+    angular_axis: 2                 # Right Stick X → turn left/right
+
+    # Axis inversion: most controllers report stick-up as -1.0
+    linear_axis_inverted: true      # Negate so forward = positive
+    angular_axis_inverted: false    # Left stick → positive angular (turn left)
+
+    # ── Button Mapping ──
+    # Generic PS3 2.4GHz controller (most common):
+    #   Btn 0=X  1=O  2=□  3=△  4=L1  5=R1  6=L2  7=R2  8=Select  9=Start
+    enable_button: 4                # L1 — deadman switch (MUST hold to drive)
+    turbo_button: 5                 # R1 — turbo mode (hold with L1 for full speed)
+    estop_button: 9                 # Start — emergency stop
+
+    # ── Deadzone & Timing ──
+    stick_deadzone: 0.1             # Ignore small stick wobble
+    publish_rate: 20.0              # Hz — matches diff_drive_node rate
+    joy_timeout: 0.5                # Stop if no Joy messages for this long

@@ -19,6 +19,9 @@
   <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
 
+  <!-- Joystick teleop -->
+  <exec_depend>joy</exec_depend>
+
   <!-- Real hardware dependencies -->
   <exec_depend>sllidar_ros2</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
