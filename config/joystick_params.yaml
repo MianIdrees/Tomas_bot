@@ -36,8 +36,8 @@ joystick_teleop_node:
     max_angular_speed: 2.5          # rad/s — physical turning max
 
     # ── Normal Mode (L1 held) — safe indoor speed ──
-    normal_linear_scale: 0.5        # 50% → 0.24 m/s
-    normal_angular_scale: 0.5       # 50% → 1.25 rad/s
+    normal_linear_scale: 0.3        # 50% → 0.24 m/s
+    normal_angular_scale: 0.3       # 50% → 1.25 rad/s
 
     # ── Turbo Mode (L1 + R1 held) — full speed ──
     turbo_linear_scale: 1.0         # 100% → 0.47 m/s
@@ -51,15 +51,15 @@ joystick_teleop_node:
     angular_axis: 2                 # Right Stick X → turn left/right
 
     # Axis inversion: most controllers report stick-up as -1.0
-    linear_axis_inverted: true      # Negate so forward = positive
+    linear_axis_inverted: false      # Negate so forward = positive
     angular_axis_inverted: false    # Left stick → positive angular (turn left)
 
     # ── Button Mapping ──
     # Generic PS3 2.4GHz controller (most common):
     #   Btn 0=X  1=O  2=□  3=△  4=L1  5=R1  6=L2  7=R2  8=Select  9=Start
-    enable_button: 4                # L1 — deadman switch (MUST hold to drive)
-    turbo_button: 5                 # R1 — turbo mode (hold with L1 for full speed)
-    estop_button: 9                 # Start — emergency stop
+    enable_button: 6                # L1 — deadman switch (MUST hold to drive)
+    turbo_button: 7                 # R1 — turbo mode (hold with L1 for full speed)
+    estop_button: 11                 # Start — emergency stop
 
     # ── Deadzone & Timing ──
     stick_deadzone: 0.1             # Ignore small stick wobble
