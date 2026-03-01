@@ -106,7 +106,7 @@
 #define INTEGRAL_LIMIT  150.0
 
 // Target ramping for smooth acceleration
-#define RAMP_RATE  5.0f   // ticks/interval per PID cycle
+#define RAMP_RATE  10.0f  // ticks/interval per PID cycle (fast response; PID handles smooth output)
 
 // ========================== PID STATE ==========================
 

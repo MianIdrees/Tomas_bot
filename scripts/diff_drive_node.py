@@ -66,10 +66,10 @@ class DiffDriveNode(Node):
         self.declare_parameter('wheel_separation', 0.181)  # Center-to-center: 181mm
         self.declare_parameter('wheel_radius', 0.0345)     # 69mm wheels
         self.declare_parameter('ticks_per_rev', 528.0)     # 11 PPR x 48:1 gear (CALIBRATE)
-        self.declare_parameter('max_motor_speed', 0.4)    # [SPEED] Hardware max: 130 RPM × π × 0.069m ≈ 0.47 m/s
-        self.declare_parameter('min_pwm', 17)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
+        self.declare_parameter('max_motor_speed', 0.47)    # [SPEED] Hardware max: 130 RPM × π × 0.069m ≈ 0.47 m/s
+        self.declare_parameter('min_pwm', 35)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
         self.declare_parameter('angular_deadband', 0.05)     # rad/s — filter only jitter, allow real turn commands through
-        self.declare_parameter('pwm_ramp_rate', 6)          # Max PWM change per cmd_vel cycle (smooth accel/decel)
+        self.declare_parameter('pwm_ramp_rate', 50)          # Max PWM change per cmd_vel cycle (near-instant; Arduino PID handles smooth accel)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_tf', True)
@@ -143,11 +143,17 @@ class DiffDriveNode(Node):
         # Store last motor command for continuous resending
         self.last_left_pwm = 0
         self.last_right_pwm = 0
+        self.pwm_log_counter = 0  # Periodic PWM diagnostic logging
 
         self.get_logger().info(
             f'DiffDriveNode started: port={self.serial_port}, '
             f'wheel_sep={self.wheel_sep}, wheel_rad={self.wheel_rad}, '
             f'ticks_per_rev={self.ticks_per_rev}'
+        )
+        self.get_logger().info(
+            f'Motor params: max_speed={self.max_motor_speed} m/s, '
+            f'min_pwm={self.min_pwm}, ramp_rate={self.pwm_ramp_rate}, '
+            f'pwm_per_mps={self.pwm_per_mps:.1f}'
         )
 
     def connect_serial(self):
@@ -222,6 +228,16 @@ class DiffDriveNode(Node):
         self.last_left_pwm = left_pwm
         self.last_right_pwm = right_pwm
         self.send_motor_command(left_pwm, right_pwm)
+
+        # Periodic PWM diagnostic logging (every ~2s at 20Hz)
+        self.pwm_log_counter += 1
+        if self.pwm_log_counter >= 40:
+            self.pwm_log_counter = 0
+            if left_pwm != 0 or right_pwm != 0:
+                self.get_logger().info(
+                    f'[PWM] cmd_vel: v={v:.3f} w={w:.3f} → '
+                    f'PWM L={left_pwm} R={right_pwm}'
+                )
 
     def _rescale_pwm(self, pwm):
         """Map [1..255] → [min_pwm..255] so any command moves the motor.

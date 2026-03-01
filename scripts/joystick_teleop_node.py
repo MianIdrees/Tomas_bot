@@ -35,8 +35,8 @@ Control Scheme:
   Start         → Emergency stop   (zero velocity, clears turbo)
 
 Speed Modes:
-  Normal (L1 only):  50% of hardware max → ~0.24 m/s linear, ~1.25 rad/s angular
-  Turbo  (L1 + R1):  100% of hardware max → ~0.47 m/s linear, ~2.50 rad/s angular
+  Normal (L1 only):  ~0.14 m/s linear, ~1.25 rad/s angular (expo curve boosts low-end)
+  Turbo  (L1 + R1):  ~0.40 m/s linear, ~1.63 rad/s angular (expo curve boosts low-end)
 
 Safety:
   - Deadman switch: Robot stops instantly when L1 is released
@@ -57,11 +57,20 @@ class JoystickTeleopNode(Node):
         # ========================== PARAMETERS ==========================
         # --- Speed Limits (match robot hardware) ---
         self.declare_parameter('max_linear_speed', 0.47)       # m/s (130 RPM motor max)
-        self.declare_parameter('max_angular_speed', 2.5)       # rad/s
-        self.declare_parameter('normal_linear_scale', 0.5)     # 50% of max in normal mode
+        self.declare_parameter('max_angular_speed', 2.5)       # rad/s (needs to be high due to small wheel separation)
+        self.declare_parameter('normal_linear_scale', 0.3)     # 30% of max in normal mode
         self.declare_parameter('normal_angular_scale', 0.5)    # 50% of max in normal mode
-        self.declare_parameter('turbo_linear_scale', 1.0)      # 100% of max in turbo mode
-        self.declare_parameter('turbo_angular_scale', 1.0)     # 100% of max in turbo mode
+        self.declare_parameter('turbo_linear_scale', 0.85)     # 85% of max in turbo mode
+        self.declare_parameter('turbo_angular_scale', 0.65)    # 65% of max in turbo mode
+
+        # --- Response Curves ---
+        self.declare_parameter('angular_expo', 0.5)            # Exponent for angular stick (0.5=sqrt: boosts low-end, tames high-end)
+
+        # --- Combined Motion (forward + turn) ---
+        # When both sticks are active, the small wheel separation (0.181m)
+        # makes it hard to turn while moving. These factors adjust the mix:
+        self.declare_parameter('combined_linear_reduction', 0.6)   # Reduce linear to 60% during turns
+        self.declare_parameter('combined_angular_boost', 1.5)      # Boost angular by 1.5x during combined motion
 
         # --- Axis Mapping (generic PS3 2.4GHz controller defaults) ---
         self.declare_parameter('linear_axis', 1)               # Left Stick Y
@@ -69,9 +78,9 @@ class JoystickTeleopNode(Node):
         self.declare_parameter('linear_axis_inverted', True)   # Y-axis: up = -1.0 on most controllers
         self.declare_parameter('angular_axis_inverted', False) # X-axis: left = -1.0 (maps to positive angular = turn left)
 
-        # --- Button Mapping (generic PS3 2.4GHz controller defaults) ---
-        self.declare_parameter('enable_button', 4)             # L1 — deadman switch
-        self.declare_parameter('turbo_button', 5)              # R1 — turbo mode
+        # --- Button Mapping (verified via jstest /dev/input/js0) ---
+        self.declare_parameter('enable_button', 6)             # L1 — deadman switch
+        self.declare_parameter('turbo_button', 7)              # R1 — turbo mode
         self.declare_parameter('estop_button', 9)              # Start — emergency stop
 
         # --- Deadzone & Timing ---
@@ -86,6 +95,11 @@ class JoystickTeleopNode(Node):
         self.normal_ang_scale = self.get_parameter('normal_angular_scale').value
         self.turbo_lin_scale = self.get_parameter('turbo_linear_scale').value
         self.turbo_ang_scale = self.get_parameter('turbo_angular_scale').value
+
+        self.angular_expo = self.get_parameter('angular_expo').value
+
+        self.combined_lin_reduction = self.get_parameter('combined_linear_reduction').value
+        self.combined_ang_boost = self.get_parameter('combined_angular_boost').value
 
         self.linear_axis = self.get_parameter('linear_axis').value
         self.angular_axis = self.get_parameter('angular_axis').value
@@ -105,6 +119,8 @@ class JoystickTeleopNode(Node):
         self.last_joy_time = self.get_clock().now()
         self.estop_active = False
         self.enabled_prev = False  # Track enable transitions for logging
+        self.turbo_prev = False    # Track turbo transitions for logging
+        self.log_counter = 0       # Periodic velocity logging counter
 
         # ========================== ROS2 INTERFACES ==========================
         self.joy_sub = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
@@ -198,8 +214,26 @@ class JoystickTeleopNode(Node):
         raw_linear = self._apply_deadzone(raw_linear)
         raw_angular = self._apply_deadzone(raw_angular)
 
+        # Apply non-linear curve to angular stick:
+        # Square root (expo=0.5) boosts small deflections so the heavy robot
+        # actually turns, while compressing full deflection to prevent wild spinning.
+        #   Stick 0.2 → 0.45  (more than doubled — overcomes motor stiction)
+        #   Stick 0.5 → 0.71  (boosted mid-range for responsive arc turns)
+        #   Stick 1.0 → 1.00  (max unchanged)
+        if raw_angular != 0.0:
+            sign_ang = 1.0 if raw_angular > 0 else -1.0
+            raw_angular = sign_ang * (abs(raw_angular) ** self.angular_expo)
+
         # --- Determine speed scale (normal vs turbo) ---
         turbo = self._get_button(joy, self.turbo_btn)
+
+        # Turbo transition logging
+        if turbo and not self.turbo_prev:
+            self.get_logger().info('TURBO mode ON (R1 held)')
+        elif not turbo and self.turbo_prev:
+            self.get_logger().info('TURBO mode OFF (R1 released)')
+        self.turbo_prev = turbo
+
         if turbo:
             lin_scale = self.turbo_lin_scale
             ang_scale = self.turbo_ang_scale
@@ -208,8 +242,38 @@ class JoystickTeleopNode(Node):
             ang_scale = self.normal_ang_scale
 
         # --- Compute velocity (proportional to stick deflection) ---
-        twist.linear.x = raw_linear * self.max_linear * lin_scale
-        twist.angular.z = raw_angular * self.max_angular * ang_scale
+        linear_vel = raw_linear * self.max_linear * lin_scale
+        angular_vel = raw_angular * self.max_angular * ang_scale
+
+        # --- Combined motion mixing ---
+        # When both sticks are active (forward + turn), the 0.181m wheel separation
+        # means angular barely creates any PWM difference between wheels.
+        # Solution: reduce linear and boost angular proportional to how much
+        # the angular stick is deflected, so turns actually happen.
+        if abs(raw_linear) > 0.0 and abs(raw_angular) > 0.0:
+            # Turn intensity: how much angular stick is pushed (0.0 to 1.0)
+            turn_intensity = abs(raw_angular)
+            # Blend: at full turn stick, linear is reduced to 60% and angular boosted 1.5x
+            # At small turn stick deflections, the effect is proportionally smaller
+            lin_factor = 1.0 - (1.0 - self.combined_lin_reduction) * turn_intensity
+            ang_factor = 1.0 + (self.combined_ang_boost - 1.0) * turn_intensity
+            linear_vel *= lin_factor
+            angular_vel *= ang_factor
+
+        twist.linear.x = linear_vel
+        twist.angular.z = angular_vel
+
+        # Periodic velocity logging (every ~2s) for diagnostics
+        self.log_counter += 1
+        if self.log_counter >= 40:  # 40 cycles at 20Hz = 2 seconds
+            self.log_counter = 0
+            mode = 'TURBO' if turbo else 'NORMAL'
+            self.get_logger().info(
+                f'[{mode}] cmd_vel: lin={twist.linear.x:.3f} m/s, '
+                f'ang={twist.angular.z:.3f} rad/s | '
+                f'stick: lin_raw={raw_linear:.2f}, ang_raw={raw_angular:.2f} | '
+                f'scale: {lin_scale:.1f}'
+            )
 
         self.cmd_vel_pub.publish(twist)
 

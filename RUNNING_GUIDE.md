@@ -162,18 +162,19 @@ ros2 launch Tomas_bot joystick_teleop.launch.py
 |---------|-------|--------|
 | **Forward / Backward** | Left Stick ↑↓ | Proportional linear velocity (push more = go faster) |
 | **Turn Left / Right** | Right Stick ←→ | Proportional angular velocity (push more = turn faster) |
+| **Forward + Turn** | Both sticks | Arc motion — push left stick for speed, right stick to steer |
 | **Enable (Deadman)** | **Hold L1** | **MUST hold to drive** — robot stops instantly when released |
-| **Turbo Mode** | Hold L1 + R1 | Full speed (0.47 m/s linear, 2.5 rad/s angular) |
-| **Normal Mode** | Hold L1 only | Half speed (0.24 m/s linear, 1.25 rad/s angular) |
+| **Turbo Mode** | Hold L1 + R1 | Fast speed (~0.40 m/s linear, ~1.63 rad/s angular) |
+| **Normal Mode** | Hold L1 only | Gentle speed (~0.14 m/s linear, ~1.25 rad/s angular) |
 | **Emergency Stop** | Press Start | Immediately stops robot; press L1 again to resume |
 
 ### Speed Modes
 
 | Mode | Linear Speed | Angular Speed | How to Activate |
-|------|-------------|---------------|-----------------|
+|------|-------------|---------------|------------------|
 | **Stopped** | 0 m/s | 0 rad/s | Release L1 (or press Start) |
-| **Normal** | up to 0.24 m/s | up to 1.25 rad/s | Hold L1 + move sticks |
-| **Turbo** | up to 0.47 m/s | up to 2.50 rad/s | Hold L1 + R1 + move sticks |
+| **Normal** | up to ~0.14 m/s | up to ~1.25 rad/s | Hold L1 + move sticks |
+| **Turbo** | up to ~0.40 m/s | up to ~1.63 rad/s | Hold L1 + R1 + move sticks |
 
 > **For SLAM mapping:** Use Normal mode (L1 only) and push the stick gently (~30%) for slow, clean maps.
 
@@ -194,10 +195,10 @@ Generic PS3 controllers vary between manufacturers. If the sticks or buttons don
      ros__parameters:
        linear_axis: 1        # Change to YOUR left stick Y axis number
        angular_axis: 2       # Change to YOUR right stick X axis number
-       enable_button: 4      # Change to YOUR L1 button number
-       turbo_button: 5       # Change to YOUR R1 button number
+       enable_button: 6      # Change to YOUR L1 button number
+       turbo_button: 7       # Change to YOUR R1 button number
        estop_button: 9       # Change to YOUR Start button number
-       linear_axis_inverted: true   # Set false if forward = positive already
+       linear_axis_inverted: false  # Set true if forward = negative on your controller
        angular_axis_inverted: false # Set true if left = positive already
    ```
 

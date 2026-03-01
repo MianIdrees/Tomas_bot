@@ -33,15 +33,31 @@ joystick_teleop_node:
   ros__parameters:
     # ── Speed Limits (match diff_drive_node hardware max) ──
     max_linear_speed: 0.47          # m/s — 130 RPM motor hardware max
-    max_angular_speed: 2.5          # rad/s — physical turning max
+    max_angular_speed: 2.5          # rad/s — high value needed (0.181m wheel separation = tiny PWM diffs)
 
     # ── Normal Mode (L1 held) — safe indoor speed ──
-    normal_linear_scale: 0.3        # 50% → 0.24 m/s
-    normal_angular_scale: 0.3       # 50% → 1.25 rad/s
+    normal_linear_scale: 0.3        # 30% → ~0.14 m/s  (gentle driving)
+    normal_angular_scale: 0.3       # 50% → ~1.25 rad/s (responsive turns for heavy robot)
 
-    # ── Turbo Mode (L1 + R1 held) — full speed ──
-    turbo_linear_scale: 1.0         # 100% → 0.47 m/s
-    turbo_angular_scale: 1.0        # 100% → 2.5 rad/s
+    # ── Turbo Mode (L1 + R1 held) — fast outdoor speed ──
+    turbo_linear_scale: 0.85        # 85% → ~0.40 m/s  (clearly faster, 2.8x normal)
+    turbo_angular_scale: 0.65       # 65% → ~1.63 rad/s (quick turns, 1.3x normal)
+
+    # ── Response Curve ──
+    # Exponent applied to angular stick: 0.5 = square root
+    # Boosts low stick deflections so heavy robot actually turns,
+    # while compressing high deflections to prevent wild spinning.
+    #   Stick 20% → 45% output  |  Stick 50% → 71% output  |  Stick 100% → 100%
+    angular_expo: 0.5
+
+    # ── Combined Motion (forward + turn simultaneously) ──
+    # When both sticks are active, the small wheel separation (0.181m)
+    # limits turning ability. These factors improve arc turns:
+    #   - Reduce linear speed so angular has more PWM headroom
+    #   - Boost angular so the wheel speed difference is bigger
+    # Effect scales with turn stick deflection (smooth blending).
+    combined_linear_reduction: 0.5  # Linear drops to 60% at full turn stick
+    combined_angular_boost: 1.7     # Angular boosted 1.5x during combined motion
 
     # ── Axis Mapping ──
     # Generic PS3 2.4GHz controller (most common):
@@ -54,12 +70,13 @@ joystick_teleop_node:
     linear_axis_inverted: false      # Negate so forward = positive
     angular_axis_inverted: false    # Left stick → positive angular (turn left)
 
-    # ── Button Mapping ──
-    # Generic PS3 2.4GHz controller (most common):
-    #   Btn 0=X  1=O  2=□  3=△  4=L1  5=R1  6=L2  7=R2  8=Select  9=Start
+    # ── Button Mapping (verified via jstest /dev/input/js0) ──
+    # This controller maps L1/R1 to indices 6/7 (not the typical 4/5):
+    #   Btn 0=X  1=O  2=□  3=△  4=L2  5=R2  6=L1  7=R1  8=Select  9=Start
+    #   Btn 10=L3  11=R3
     enable_button: 6                # L1 — deadman switch (MUST hold to drive)
     turbo_button: 7                 # R1 — turbo mode (hold with L1 for full speed)
-    estop_button: 11                 # Start — emergency stop
+    estop_button: 9                 # Start — emergency stop
 
     # ── Deadzone & Timing ──
     stick_deadzone: 0.1             # Ignore small stick wobble
