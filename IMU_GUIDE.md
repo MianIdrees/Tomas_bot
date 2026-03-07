@@ -475,14 +475,23 @@ ros2 run tf2_tools view_frames
 
 ### Map Quality Degraded After Adding IMU
 
-**Symptom:** SLAM map is worse than before IMU
+**Symptom:** SLAM map is worse than before IMU (robot jumps in RViz, distorted map)
+
+This was a real issue on Tomas_bot. The root causes and fixes were:
 
 | Cause | Fix |
 |-------|-----|
-| IMU orientation wrong | Ensure BNO085 +X faces robot forward, chip-side up |
-| EKF trusts IMU too much | Increase IMU covariance in diff_drive_node (orientation_covariance) |
-| Frame mismatch | Verify `imu_link` in URDF matches `imu_frame` parameter |
+| **EKF fuses absolute yaw from BOTH encoders AND IMU** | Only fuse gyro angular velocity (vyaw) from IMU — NOT orientation. Both sources fighting over heading causes pose jumps |
+| **EKF fuses accelerometer data** | Disable IMU linear acceleration fusion — too noisy on a small vibrating robot. Encoder velocity is more reliable |
+| **IMU orientation covariance too low (too trusting)** | Increase orientation covariance from 0.01 to 0.1; increase angular velocity covariance from 0.001 to 0.01 |
 | IMU mounted loosely | Secure with double-sided tape or screws |
+| Frame mismatch | Verify `imu_link` in URDF matches `imu_frame` parameter |
+
+**The correct EKF approach for Tomas_bot:**
+- Encoders provide: x, y, yaw (position + heading), vx, vyaw (velocities)
+- IMU provides: **only vyaw** (gyroscope Z angular velocity) — smooths encoder heading without fighting it
+- No absolute orientation from IMU (prevents jumps)
+- No linear acceleration from IMU (prevents noise)
 
 ### Left Encoder Not Working After Pin Move
 

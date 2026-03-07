@@ -330,26 +330,28 @@ class DiffDriveNode(Node):
             imu_msg.orientation.x = qx
             imu_msg.orientation.y = qy
             imu_msg.orientation.z = qz
-            # Orientation covariance (BNO085 has good orientation accuracy)
-            imu_msg.orientation_covariance[0] = 0.01
-            imu_msg.orientation_covariance[4] = 0.01
-            imu_msg.orientation_covariance[8] = 0.01
+            # Orientation covariance — set high since EKF does NOT fuse orientation
+            # (kept for completeness; orientation fields are still populated for diagnostics)
+            imu_msg.orientation_covariance[0] = 0.1
+            imu_msg.orientation_covariance[4] = 0.1
+            imu_msg.orientation_covariance[8] = 0.1
 
             # Angular velocity from calibrated gyroscope (rad/s)
+            # Only vyaw (z) is fused by EKF — used as secondary to encoders
             imu_msg.angular_velocity.x = gx
             imu_msg.angular_velocity.y = gy
             imu_msg.angular_velocity.z = gz
-            imu_msg.angular_velocity_covariance[0] = 0.001
-            imu_msg.angular_velocity_covariance[4] = 0.001
-            imu_msg.angular_velocity_covariance[8] = 0.001
+            imu_msg.angular_velocity_covariance[0] = 0.01
+            imu_msg.angular_velocity_covariance[4] = 0.01
+            imu_msg.angular_velocity_covariance[8] = 0.01
 
-            # Linear acceleration (m/s^2)
+            # Linear acceleration (m/s^2) — NOT fused by EKF (too noisy)
             imu_msg.linear_acceleration.x = ax
             imu_msg.linear_acceleration.y = ay
             imu_msg.linear_acceleration.z = az
-            imu_msg.linear_acceleration_covariance[0] = 0.1
-            imu_msg.linear_acceleration_covariance[4] = 0.1
-            imu_msg.linear_acceleration_covariance[8] = 0.1
+            imu_msg.linear_acceleration_covariance[0] = 1.0
+            imu_msg.linear_acceleration_covariance[4] = 1.0
+            imu_msg.linear_acceleration_covariance[8] = 1.0
 
             self.imu_pub.publish(imu_msg)
         except (ValueError, IndexError):

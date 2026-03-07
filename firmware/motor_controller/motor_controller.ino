@@ -339,15 +339,15 @@ void readIMU() {
                 imu_az = az / 256.0f;
                 pos += 10;
             }
-            else if (id == SH2_GYROSCOPE_CALIBRATED && pos + 10 <= len) {
-                // 4-byte header + 6 bytes data
+            else if (id == SH2_GYROSCOPE_CALIBRATED && pos + 16 <= len) {
+                // 4-byte header + 6 bytes gyro data + 6 bytes bias (16 total)
                 int16_t gx = (int16_t)((uint16_t)bno_buf[pos+4] | ((uint16_t)bno_buf[pos+5] << 8));
                 int16_t gy = (int16_t)((uint16_t)bno_buf[pos+6] | ((uint16_t)bno_buf[pos+7] << 8));
                 int16_t gz = (int16_t)((uint16_t)bno_buf[pos+8] | ((uint16_t)bno_buf[pos+9] << 8));
                 imu_gx = gx / 512.0f;  // Q9, rad/s
                 imu_gy = gy / 512.0f;
                 imu_gz = gz / 512.0f;
-                pos += 10;
+                pos += 16;  // Skip full report including 6 bias bytes
             }
             else {
                 break;  // Unknown report or not enough data

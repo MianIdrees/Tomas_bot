@@ -50,15 +50,19 @@ ekf_filter_node:
 
     # ─── imu0: BNO085 IMU ────────────────────────────────────────────────
     # Published by diff_drive_node.py on /imu/data
-    # We trust: yaw orientation, angular velocity (z), and linear acceleration
-    # In 2D mode, roll and pitch are ignored
-    # BNO085 Game Rotation Vector provides absolute yaw (no magnetometer drift)
+    #
+    # IMPORTANT: Only fuse yaw angular velocity (gyroscope) from IMU.
+    # Do NOT fuse absolute orientation — it conflicts with encoder-derived
+    # yaw and causes the robot pose to jump, distorting the SLAM map.
+    # Do NOT fuse linear acceleration — too noisy on small vibrating robot.
+    #
+    # The gyro yaw rate smooths the encoder heading without fighting it.
     imu0: /imu/data
     imu0_config: [false, false, false,   # x, y, z
-                  true,  true,  true,    # roll, pitch, yaw
+                  false, false, false,   # roll, pitch, yaw  (OFF — prevents jumps)
                   false, false, false,   # vx, vy, vz
-                  true,  true,  true,    # vroll, vpitch, vyaw
-                  true,  true,  true]    # ax, ay, az
+                  false, false, true,    # vroll, vpitch, vyaw  (gyro Z only)
+                  false, false, false]   # ax, ay, az  (OFF — too noisy)
     imu0_differential: false
     imu0_relative: false
     imu0_remove_gravitational_acceleration: true
