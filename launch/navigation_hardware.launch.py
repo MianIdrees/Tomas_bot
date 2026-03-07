@@ -9,10 +9,10 @@ Launches the Nav2 stack for real robot navigation:
 Prerequisites:
   1. ros2 launch Tomas_bot bringup_hardware.launch.py
   2. Have a saved map (run SLAM first, then save with:
-     ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map)
+     ros2 run nav2_map_server map_saver_cli -f ~/robot_ws/my_map1)
 
 Usage (on LattePanda Alpha):
-  ros2 launch Tomas_bot navigation_hardware.launch.py map:=/path/to/map.yaml
+  ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml
 
 Then on DESKTOP:
   1. Open RViz with nav2_view.rviz
@@ -62,7 +62,7 @@ def generate_launch_description():
     )
     declare_map = DeclareLaunchArgument(
         'map',
-        default_value=os.path.join(os.path.expanduser('~'), 'maps', 'my_map.yaml'),
+        default_value=os.path.join(os.path.expanduser('~'), 'robot_ws', 'my_map1.yaml'),
         description='Full path to the map yaml file to load',
     )
 

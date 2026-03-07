@@ -373,7 +373,7 @@ ros2 launch Tomas_bot joystick_teleop.launch.py
 ros2 launch Tomas_bot slam_hardware.launch.py
 
 # For autonomous navigation (after you have a map)
-ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/maps/my_map.yaml
+ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml
 ```
 
 ### Verify Everything is Running

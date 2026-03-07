@@ -254,13 +254,12 @@ When you are satisfied with the map in RViz2:
 
 ```bash
 # Terminal 5 — Save map
-mkdir -p ~/maps
-ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map
+ros2 run nav2_map_server map_saver_cli -f ~/robot_ws/my_map1
 ```
 
 This creates:
-- `~/maps/my_map.pgm` — occupancy grid image
-- `~/maps/my_map.yaml` — metadata
+- `~/robot_ws/my_map1.pgm` — occupancy grid image
+- `~/robot_ws/my_map1.yaml` — metadata
 
 Now stop SLAM: **Ctrl+C** in Terminal 3.
 
@@ -273,16 +272,30 @@ With bringup still running (Step 2), **stop SLAM first** (Ctrl+C), then:
 ```bash
 # Terminal 3 — Nav2 + RViz2 (keep running)
 source ~/robot_ws/install/setup.bash
-ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map_room.yaml
+ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml
 ```
 
-> **Note:** RViz2 opens automatically. To disable: `ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map_room.yaml use_rviz:=false`
+> **Note:** RViz2 opens automatically. To disable: `ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml use_rviz:=false`
 
 ### Navigate in RViz2:
-1. Click **"2D Pose Estimate"** → click and drag on the map where the robot currently is (sets initial localization)
-2. Wait a few seconds for AMCL particle cloud to converge
+1. Wait ~5 seconds for AMCL to auto-initialize (initial pose is set automatically at map origin)
+2. If the robot is NOT at the map origin, click **"2D Pose Estimate"** → click and drag on the map where the robot currently is
 3. Click **"2D Goal Pose"** → click and drag where you want the robot to go
 4. The robot plans a path and navigates autonomously!
+
+### Headless Navigation (no RViz2):
+You can send goals from the command line without RViz2:
+```bash
+# Send a goal to position (x=1.0, y=0.0) facing forward
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose "
+pose:
+  header:
+    frame_id: map
+  pose:
+    position: {x: 1.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+" --feedback
+```
 
 ---
 
@@ -366,14 +379,13 @@ ros2 launch Tomas_bot slam_hardware.launch.py
 # ──────────────────────────────────────────────────────────
 # SAVE MAP (Terminal 4 — after mapping is complete)
 # ──────────────────────────────────────────────────────────
-mkdir -p ~/maps
-ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map
+ros2 run nav2_map_server map_saver_cli -f ~/robot_ws/my_map1
 
 # ──────────────────────────────────────────────────────────
 # AUTONOMOUS NAVIGATION + RVIZ2 (Terminal 3 — after stopping SLAM)
 # RViz2 opens automatically; add use_rviz:=false to disable
 # ──────────────────────────────────────────────────────────
-ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/maps/my_map.yaml
+ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml
 
 # ──────────────────────────────────────────────────────────
 # DEBUG / VERIFY
@@ -476,9 +488,11 @@ The default `ticks_per_rev=528` assumes 48:1 gear ratio × 11 PPR. To calibrate:
 
 ### Nav2 goal fails
 1. Check map quality — re-map if needed
-2. Ensure initial pose estimate is accurate (2D Pose Estimate in RViz2)
+2. If robot is not at map origin, set initial pose in RViz2 (2D Pose Estimate) or restart at origin
 3. Check that the goal is in free space on the map
 4. Check terminal output for error messages
+5. Verify `map → odom` TF: `ros2 run tf2_ros tf2_echo map odom`
+6. If AMCL won't initialize, ensure LiDAR `/scan` is publishing: `ros2 topic hz /scan`
 
 ### Wheels spin wrong direction
 - Swap IN1/IN2 wires (left motor) or IN3/IN4 wires (right motor) on L298N
