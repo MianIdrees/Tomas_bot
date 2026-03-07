@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * Arduino Leonardo — Dual Motor + Encoder Controller for ROS2 Differential Drive
+ * Arduino Leonardo — Motor + Encoder + BNO085 IMU Controller for ROS2
  * ============================================================================
  * Target: Arduino Leonardo (ATmega32U4) built into LattePanda Alpha
  *
@@ -14,6 +14,10 @@
  * Motor Driver: L298N H-Bridge
  *   - Power: 6–12V input
  *
+ * IMU: Adafruit BNO085 (9-DOF) via I²C
+ *   - I²C Address: 0x4A (default)
+ *   - Reports: Game Rotation Vector + Gyroscope + Accelerometer
+ *
  * Pin Assignments:
  *   L298N Motor Driver:
  *     ENA → D5  (PWM, left motor speed)
@@ -23,13 +27,18 @@
  *     IN4 → D9  (right motor direction)
  *     ENB → D11 (PWM, right motor speed)
  *
- *   Left Motor Encoder:
- *     Green  → D3  (Channel A — hardware interrupt INT0)
- *     Yellow → D2  (Channel B — direction sensing)
+ *   Left Motor Encoder (MOVED for I²C — see Integration Guide):
+ *     Green  → D1  (Channel A — hardware interrupt INT3)
+ *     Yellow → D0  (Channel B — direction sensing)
  *
  *   Right Motor Encoder:
  *     Yellow → A4  (Channel A — polled, no hardware interrupt)
  *     Green  → A5  (Channel B — direction sensing)
+ *
+ *   BNO085 IMU (I²C on D2/D3):
+ *     VIN → 5V,  GND → GND
+ *     SDA → D2,  SCL → D3
+ *     INT → D4 (optional, data-ready interrupt)
  *
  * Serial Protocol (115200 baud, USB CDC):
  *   Commands FROM ROS2 (LattePanda → Leonardo):
@@ -39,6 +48,8 @@
  *   Feedback TO ROS2 (Leonardo → LattePanda):
  *     e <left_ticks> <right_ticks>\n
  *       Cumulative signed encoder ticks, sent every 50ms (20 Hz)
+ *     i <qw> <qx> <qy> <qz> <ax> <ay> <az> <gx> <gy> <gz>\n
+ *       IMU data: quaternion + linear accel (m/s²) + gyro (rad/s), 50ms
  *
  *   Reset command:
  *     r\n  — Resets encoder counts to zero
@@ -53,6 +64,9 @@
  * ============================================================================
  */
 
+#include <Wire.h>
+#include <Adafruit_BNO08x.h>
+
 // ========================== PIN DEFINITIONS ==========================
 
 // Left Motor (L298N)
@@ -65,13 +79,16 @@
 #define RIGHT_IN4  9    // Direction
 #define RIGHT_ENB  11   // PWM speed control
 
-// Left Encoder (hardware interrupt capable on Leonardo)
-#define LEFT_ENC_A   3  // Green wire → INT0 on Leonardo
-#define LEFT_ENC_B   2  // Yellow wire → direction sensing
+// Left Encoder — MOVED from D3/D2 to D1/D0 to free I²C bus
+#define LEFT_ENC_A   1  // Green wire → INT3 on Leonardo (moved from D3)
+#define LEFT_ENC_B   0  // Yellow wire → direction sensing (moved from D2)
 
 // Right Encoder (polled — A4/A5 have no hardware interrupt on ATmega32U4)
 #define RIGHT_ENC_A  A4  // Yellow wire → polled channel A
 #define RIGHT_ENC_B  A5  // Green wire  → direction sensing
+
+// BNO085 IMU (I²C on hardware SDA=D2, SCL=D3)
+#define BNO085_INT_PIN  4   // Optional data-ready interrupt
 
 // ========================== CONFIGURATION ==========================
 
@@ -146,8 +163,87 @@ unsigned long last_cmd_time     = 0;
 char serial_buf[SERIAL_BUF_SIZE];
 int  serial_idx = 0;
 
+// ========================== BNO085 IMU STATE ==========================
+
+Adafruit_BNO08x bno08x(BNO085_INT_PIN);
+sh2_SensorValue_t imu_value;
+bool imu_available = false;
+
+// Latest IMU readings
+float imu_qw = 1.0f, imu_qx = 0.0f, imu_qy = 0.0f, imu_qz = 0.0f;
+float imu_ax = 0.0f, imu_ay = 0.0f, imu_az = 0.0f;
+float imu_gx = 0.0f, imu_gy = 0.0f, imu_gz = 0.0f;
+
+unsigned long last_imu_publish_time = 0;
+#define IMU_PUBLISH_INTERVAL_MS  50  // 20 Hz, aligned with encoder rate
+
+void initIMU() {
+    if (!bno08x.begin_I2C(0x4A)) {
+        Serial.println("! BNO085 not detected on I2C 0x4A");
+        imu_available = false;
+        return;
+    }
+    imu_available = true;
+    Serial.println("BNO085 found on I2C 0x4A");
+
+    // Enable reports: game rotation vector, accelerometer, gyroscope
+    if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 50000)) {  // 50ms = 20Hz
+        Serial.println("! Failed to enable Game Rotation Vector");
+    }
+    if (!bno08x.enableReport(SH2_ACCELEROMETER, 50000)) {
+        Serial.println("! Failed to enable Accelerometer");
+    }
+    if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 50000)) {
+        Serial.println("! Failed to enable Gyroscope");
+    }
+    Serial.println("BNO085 reports enabled (RotVec+Accel+Gyro @20Hz)");
+}
+
+void readIMU() {
+    if (!imu_available) return;
+
+    // Read all available sensor events
+    while (bno08x.getSensorEvent(&imu_value)) {
+        switch (imu_value.sensorId) {
+            case SH2_GAME_ROTATION_VECTOR:
+                imu_qw = imu_value.un.gameRotationVector.real;
+                imu_qx = imu_value.un.gameRotationVector.i;
+                imu_qy = imu_value.un.gameRotationVector.j;
+                imu_qz = imu_value.un.gameRotationVector.k;
+                break;
+            case SH2_ACCELEROMETER:
+                imu_ax = imu_value.un.accelerometer.x;
+                imu_ay = imu_value.un.accelerometer.y;
+                imu_az = imu_value.un.accelerometer.z;
+                break;
+            case SH2_GYROSCOPE_CALIBRATED:
+                imu_gx = imu_value.un.gyroscope.x;
+                imu_gy = imu_value.un.gyroscope.y;
+                imu_gz = imu_value.un.gyroscope.z;
+                break;
+        }
+    }
+}
+
+void publishIMU() {
+    if (!imu_available) return;
+    // Format: i <qw> <qx> <qy> <qz> <ax> <ay> <az> <gx> <gy> <gz>
+    Serial.print("i ");
+    Serial.print(imu_qw, 4); Serial.print(" ");
+    Serial.print(imu_qx, 4); Serial.print(" ");
+    Serial.print(imu_qy, 4); Serial.print(" ");
+    Serial.print(imu_qz, 4); Serial.print(" ");
+    Serial.print(imu_ax, 4); Serial.print(" ");
+    Serial.print(imu_ay, 4); Serial.print(" ");
+    Serial.print(imu_az, 4); Serial.print(" ");
+    Serial.print(imu_gx, 4); Serial.print(" ");
+    Serial.print(imu_gy, 4); Serial.print(" ");
+    Serial.println(imu_gz, 4);
+}
+
 // ========================== LEFT ENCODER ISR ==========================
-// Hardware interrupt on D3 (INT0 on Leonardo), RISING edge
+// Hardware interrupt on D1 (INT3 on Leonardo), RISING edge
+// NOTE: Moved from D3/INT0 to D1/INT3 to free D2/D3 for I²C (BNO085)
 
 void leftEncoderISR() {
     if (digitalRead(LEFT_ENC_B) == HIGH) {
@@ -412,7 +508,7 @@ void setup() {
     // Initialize right encoder last state for polling
     right_enc_a_last = digitalRead(RIGHT_ENC_A);
 
-    // Attach hardware interrupt for left encoder (D3 = INT0 on Leonardo)
+    // Attach hardware interrupt for left encoder (D1 = INT3 on Leonardo)
     attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
 
     // NOTE: Right encoder on A4/A5 does not support hardware interrupts
@@ -420,12 +516,19 @@ void setup() {
 
     stopMotors();
 
-    Serial.println("Leonardo motor controller ready (PID + polling)");
+    // Initialize BNO085 IMU over I²C
+    Wire.begin();
+    initIMU();
+
+    Serial.println("Leonardo motor+IMU controller ready (PID + BNO085)");
 }
 
 void loop() {
     // Poll right encoder every loop iteration for reliable detection
     pollRightEncoder();
+
+    // Read IMU data (non-blocking)
+    readIMU();
 
     // Process incoming serial commands
     readSerial();
@@ -445,5 +548,11 @@ void loop() {
     if (millis() - last_publish_time >= PUBLISH_INTERVAL_MS) {
         publishEncoders();
         last_publish_time = millis();
+    }
+
+    // Publish IMU data
+    if (millis() - last_imu_publish_time >= IMU_PUBLISH_INTERVAL_MS) {
+        publishIMU();
+        last_imu_publish_time = millis();
     }
 }

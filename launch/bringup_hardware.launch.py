@@ -4,12 +4,14 @@ bringup_hardware.launch.py — Full Robot Bringup (LattePanda Alpha)
 Launches ALL nodes needed for the real robot:
   1. Robot State Publisher (URDF → TF static tree)
   2. RPLidar C1 driver (laser scans → /scan)
-  3. Differential Drive serial node (Arduino Leonardo bridge → /odom, /joint_states, cmd_vel)
+  3. Differential Drive serial node (Arduino bridge → /wheel/odom, /imu/data, /joint_states)
+  4. EKF node (robot_localization — fuses wheel odom + IMU → /odom + TF odom→base_link)
 
-Hardware: Daniel's robot — LattePanda Alpha + built-in Arduino Leonardo
+Hardware: Tomas_bot — LattePanda Alpha + built-in Arduino Leonardo + BNO085 IMU
   Motors: 130 RPM 12V DC with quadrature encoders (11 PPR, ~48:1 gear)
   Wheels: 69mm diameter, 181mm center-to-center separation
   LiDAR:  RPLidar C1 via USB
+  IMU:    Adafruit BNO085 (9-DOF) via Arduino I²C
 
 Usage (on LattePanda Alpha):
   ros2 launch Tomas_bot bringup_hardware.launch.py
@@ -96,9 +98,27 @@ def generate_launch_description():
             'max_motor_speed': 0.47,       # 130 RPM × π × 0.069m
             'odom_frame': 'odom',
             'base_frame': 'base_link',
-            'publish_tf': True,
+            'publish_tf': False,           # EKF publishes odom→base_link TF
             'publish_rate': 20.0,
+            'imu_frame': 'imu_link',
         }],
+    )
+
+    # ========================== EKF (robot_localization) ==========================
+    # Fuses wheel encoder odometry (/wheel/odom) + BNO085 IMU (/imu/data)
+    # Publishes fused /odom and odom→base_link TF
+
+    ekf_config = os.path.join(pkg_path, 'config', 'ekf.yaml')
+
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[ekf_config],
+        remappings=[
+            ('odometry/filtered', '/odom'),
+        ],
     )
 
     # ========================== RVIZ2 ==========================
@@ -123,5 +143,6 @@ def generate_launch_description():
         rsp,
         lidar_node,
         diff_drive_node,
+        ekf_node,
         rviz_node,
     ])

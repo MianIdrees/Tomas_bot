@@ -5,6 +5,7 @@
 
   <xacro:include filename="robot_core.xacro" />
   <xacro:include filename="lidar_hardware.xacro" />
+  <xacro:include filename="imu_hardware.xacro" />
   <!-- Camera not used for navigation on real hardware (optional) -->
   <!-- <xacro:include filename="camera.xacro" /> -->
 

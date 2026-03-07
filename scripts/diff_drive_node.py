@@ -1,33 +1,18 @@
 #!/usr/bin/env python3
 """
-diff_drive_node.py - ROS2 Serial Bridge for Arduino Leonardo Motor Controller
+diff_drive_node.py - ROS2 Serial Bridge for Arduino Leonardo Motor + IMU Controller
 
-This node bridges ROS2 and the Arduino Leonardo motor controller on LattePanda Alpha:
+This node bridges ROS2 and the Arduino Leonardo controller on LattePanda Alpha:
   - Subscribes to /cmd_vel (Twist) -> sends PWM commands to Arduino Leonardo
-  - Reads encoder ticks from Arduino -> publishes /odom (Odometry) and TF odom->base_link
+  - Reads encoder ticks from Arduino -> publishes /wheel/odom (Odometry)
+  - Reads BNO085 IMU data from Arduino -> publishes /imu/data (Imu)
   - Publishes /joint_states for wheel joint visualization
-
-Hardware: Daniel's Robot - LattePanda Alpha + built-in Arduino Leonardo
-  Motors: 130 RPM 12V DC with quadrature encoders (11 PPR)
-  Wheels: 69mm diameter (0.0345m radius)
-  Wheel separation (center-to-center): 0.181m
-  Gear ratio: ~48:1 -> ticks_per_rev ~= 528
-
-Differential Drive Kinematics:
-  Forward kinematics (encoders -> odometry):
-        v_left  = (delta_left_ticks  / ticks_per_rev) * 2*pi * wheel_radius / dt
-        v_right = (delta_right_ticks / ticks_per_rev) * 2*pi * wheel_radius / dt
-        v = (v_right + v_left) / 2
-        omega = (v_right - v_left) / wheel_separation
-
-    Inverse kinematics (cmd_vel -> motor PWM):
-        v_left  = v - omega * wheel_separation / 2
-        v_right = v + omega * wheel_separation / 2
-    PWM proportional to velocity (with configurable scaling)
+  - TF odom->base_link is handled by robot_localization EKF (not this node)
 
 Serial Protocol (USB CDC, 115200 baud):
     TX to Arduino:  m <left_pwm> <right_pwm>\n
     RX from Arduino: e <left_ticks> <right_ticks>\n
+                     i <qw> <qx> <qy> <qz> <ax> <ay> <az> <gx> <gy> <gz>\n
 """
 
 import math
@@ -40,7 +25,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from geometry_msgs.msg import Twist, TransformStamped, Quaternion
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Imu
 from tf2_ros import TransformBroadcaster
 
 import serial
@@ -72,8 +57,9 @@ class DiffDriveNode(Node):
         self.declare_parameter('pwm_ramp_rate', 50)          # Max PWM change per cmd_vel cycle (near-instant; Arduino PID handles smooth accel)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('publish_tf', True)
+        self.declare_parameter('publish_tf', False)        # EKF publishes odom->base_link TF
         self.declare_parameter('publish_rate', 20.0)       # Hz
+        self.declare_parameter('imu_frame', 'imu_link')
 
         self.serial_port = self.get_parameter('serial_port').value
         self.baud_rate = self.get_parameter('baud_rate').value
@@ -88,6 +74,7 @@ class DiffDriveNode(Node):
         self.base_frame = self.get_parameter('base_frame').value
         self.publish_tf = self.get_parameter('publish_tf').value
         self.publish_rate = self.get_parameter('publish_rate').value
+        self.imu_frame = self.get_parameter('imu_frame').value
 
         # Derived constants
         self.meters_per_tick = (2.0 * math.pi * self.wheel_rad) / self.ticks_per_rev
@@ -126,8 +113,9 @@ class DiffDriveNode(Node):
             durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
-        self.odom_pub = self.create_publisher(Odometry, '/odom', qos)
+        self.odom_pub = self.create_publisher(Odometry, '/wheel/odom', qos)
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
+        self.imu_pub = self.create_publisher(Imu, '/imu/data', qos)
 
         # TF Broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -287,24 +275,29 @@ class DiffDriveNode(Node):
         except serial.SerialException as e:
             self.get_logger().warn(f'Serial write error: {e}')
 
-    def read_encoder_data(self):
-        """Read and parse encoder data from Arduino. Returns (left_ticks, right_ticks) or None."""
+    def read_serial_data(self):
+        """Read and parse encoder + IMU data from Arduino.
+        Returns (left_ticks, right_ticks) or None for encoder data.
+        Also publishes IMU data when 'i' lines are received.
+        """
         if self.ser is None or not self.ser.is_open:
             return None
 
         try:
             with self.serial_lock:
                 # Read all available lines, use the latest encoder message
-                latest = None
+                latest_enc = None
                 while self.ser.in_waiting > 0:
                     line = self.ser.readline().decode('ascii', errors='ignore').strip()
                     if line.startswith('e '):
-                        latest = line
+                        latest_enc = line
+                    elif line.startswith('i '):
+                        self._parse_imu_line(line)
 
-                if latest is None:
+                if latest_enc is None:
                     return None
 
-                parts = latest.split()
+                parts = latest_enc.split()
                 if len(parts) == 3:
                     left_ticks = int(parts[1])
                     right_ticks = int(parts[2])
@@ -315,6 +308,52 @@ class DiffDriveNode(Node):
             self.get_logger().warn(f'Serial read error: {e}')
 
         return None
+
+    def _parse_imu_line(self, line):
+        """Parse IMU serial line and publish sensor_msgs/Imu message.
+        Format: i <qw> <qx> <qy> <qz> <ax> <ay> <az> <gx> <gy> <gz>
+        """
+        try:
+            parts = line.split()
+            if len(parts) != 11:
+                return
+            qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+            ax, ay, az = float(parts[5]), float(parts[6]), float(parts[7])
+            gx, gy, gz = float(parts[8]), float(parts[9]), float(parts[10])
+
+            imu_msg = Imu()
+            imu_msg.header.stamp = self.get_clock().now().to_msg()
+            imu_msg.header.frame_id = self.imu_frame
+
+            # Orientation from BNO085 Game Rotation Vector
+            imu_msg.orientation.w = qw
+            imu_msg.orientation.x = qx
+            imu_msg.orientation.y = qy
+            imu_msg.orientation.z = qz
+            # Orientation covariance (BNO085 has good orientation accuracy)
+            imu_msg.orientation_covariance[0] = 0.01
+            imu_msg.orientation_covariance[4] = 0.01
+            imu_msg.orientation_covariance[8] = 0.01
+
+            # Angular velocity from calibrated gyroscope (rad/s)
+            imu_msg.angular_velocity.x = gx
+            imu_msg.angular_velocity.y = gy
+            imu_msg.angular_velocity.z = gz
+            imu_msg.angular_velocity_covariance[0] = 0.001
+            imu_msg.angular_velocity_covariance[4] = 0.001
+            imu_msg.angular_velocity_covariance[8] = 0.001
+
+            # Linear acceleration (m/s^2)
+            imu_msg.linear_acceleration.x = ax
+            imu_msg.linear_acceleration.y = ay
+            imu_msg.linear_acceleration.z = az
+            imu_msg.linear_acceleration_covariance[0] = 0.1
+            imu_msg.linear_acceleration_covariance[4] = 0.1
+            imu_msg.linear_acceleration_covariance[8] = 0.1
+
+            self.imu_pub.publish(imu_msg)
+        except (ValueError, IndexError):
+            pass
 
     def update_callback(self):
         """Main update loop: read encoders, compute odometry, publish."""
@@ -331,8 +370,8 @@ class DiffDriveNode(Node):
             # Resend last command at 20Hz to keep Arduino PID continuously active
             self.send_motor_command(self.last_left_pwm, self.last_right_pwm)
 
-        # Read encoders
-        enc_data = self.read_encoder_data()
+        # Read encoders and IMU
+        enc_data = self.read_serial_data()
         if enc_data is None:
             return
 
@@ -400,7 +439,7 @@ class DiffDriveNode(Node):
             self.publish_odom_tf(now)
 
     def publish_odometry(self, stamp):
-        """Publish /odom message."""
+        """Publish /wheel/odom message (encoder-only odometry for EKF fusion)."""
         odom = Odometry()
         odom.header.stamp = stamp.to_msg()
         odom.header.frame_id = self.odom_frame

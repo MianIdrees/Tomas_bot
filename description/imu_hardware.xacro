@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!--
+    BNO085 IMU — mounted flat on chassis, centered between drive wheels
+    Positioned slightly behind the LiDAR, on the wooden platform.
+    Chip-side UP, +X arrow pointing toward front of robot (REP-105).
+
+    Physical dimensions (Adafruit BNO085 breakout): ~25.4 × 20.3 × 3.2 mm
+    Mounting: centered on chassis, between drive axle and LiDAR riser
+  -->
+
+  <!-- IMU mounting joint — fixed to chassis -->
+  <joint name="imu_joint" type="fixed">
+    <parent link="chassis"/>
+    <child link="imu_link"/>
+    <!-- Position: centered (y=0), between drive axle (x=0.147 from chassis origin)
+         and LiDAR riser (x=0.337). Place at x=0.24, on top of chassis platform.
+         z offset: chassis top is at 0.055m, IMU sits on top -->
+    <origin xyz="0.24 0 0.058" rpy="0 0 0"/>
+  </joint>
+
+  <link name="imu_link">
+    <visual>
+      <geometry>
+        <!-- Adafruit BNO085 breakout board approximation -->
+        <box size="0.0254 0.0203 0.0032"/>
+      </geometry>
+      <material name="imu_blue">
+        <color rgba="0.0 0.4 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.0254 0.0203 0.0032"/>
+      </geometry>
+    </collision>
+    <xacro:inertial_box mass="0.003" x="0.0254" y="0.0203" z="0.0032">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </xacro:inertial_box>
+  </link>
+
+</robot>

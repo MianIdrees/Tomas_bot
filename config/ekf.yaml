@@ -1,0 +1,88 @@
+# =============================================================================
+# Extended Kalman Filter (EKF) — robot_localization for Tomas_bot
+# =============================================================================
+# Fuses wheel odometry (encoders) + BNO085 IMU for improved localization.
+#
+# Sensor sources:
+#   odom0: /wheel/odom  — wheel encoder odometry (position x,y + yaw from encoders)
+#   imu0:  /imu/data    — BNO085 9-DOF IMU (orientation + angular velocity + linear acceleration)
+#
+# Output:
+#   - Publishes fused /odometry/filtered (remapped to /odom in launch)
+#   - Broadcasts odom → base_link TF
+#
+# References:
+#   - robot_localization wiki: http://docs.ros.org/en/noetic/api/robot_localization/html/
+#   - REP-105 coordinate frames: https://www.ros.org/reps/rep-0105.html
+# =============================================================================
+
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 30.0
+    two_d_mode: true            # Ground robot — constrain to X, Y, yaw
+    publish_tf: true            # Publish odom → base_link TF
+    publish_acceleration: false
+
+    # Frame IDs
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom           # Use odom frame as world (map_frame used when map→odom is needed)
+
+    # Transform timeout
+    transform_timeout: 0.2
+    transform_time_offset: 0.0
+
+    # ─── odom0: Wheel Encoder Odometry ───────────────────────────────────
+    # Published by diff_drive_node.py on /wheel/odom
+    # We trust: x position, y position, and yaw from encoders
+    # We also trust linear x velocity and angular z velocity from encoders
+    odom0: /wheel/odom
+    odom0_config: [true,  true,  false,   # x, y, z
+                   false, false, true,    # roll, pitch, yaw
+                   true,  false, false,   # vx, vy, vz
+                   false, false, true,    # vroll, vpitch, vyaw
+                   false, false, false]   # ax, ay, az
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ─── imu0: BNO085 IMU ────────────────────────────────────────────────
+    # Published by diff_drive_node.py on /imu/data
+    # We trust: yaw orientation, angular velocity (z), and linear acceleration
+    # In 2D mode, roll and pitch are ignored
+    # BNO085 Game Rotation Vector provides absolute yaw (no magnetometer drift)
+    imu0: /imu/data
+    imu0_config: [false, false, false,   # x, y, z
+                  true,  true,  true,    # roll, pitch, yaw
+                  false, false, false,   # vx, vy, vz
+                  true,  true,  true,    # vroll, vpitch, vyaw
+                  true,  true,  true]    # ax, ay, az
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10
+
+    # ─── Process Noise Covariance ─────────────────────────────────────────
+    # How much the filter trusts its prediction model vs measurements
+    # Smaller values = trust prediction more; larger = trust sensors more
+    # Format: diagonal of 15×15 matrix [x, y, z, roll, pitch, yaw,
+    #          vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+    process_noise_covariance: [
+      0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.06,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025, 0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025, 0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.02,  0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.015
+    ]

@@ -3,7 +3,7 @@
 <package format="3">
   <name>Tomas_bot</name>
   <version>1.0.0</version>
-  <description>Differential drive mobile robot — LattePanda Alpha + Arduino Leonardo + RPLidar C1</description>
+  <description>Differential drive mobile robot — LattePanda Alpha + Arduino Leonardo + RPLidar C1 + BNO085 IMU</description>
   <maintainer email="idreesmian6781@gmail.com">Mian Idrees</maintainer>
   <license>MIT</license>
 
@@ -21,6 +21,9 @@
 
   <!-- Joystick teleop -->
   <exec_depend>joy</exec_depend>
+
+  <!-- IMU + sensor fusion -->
+  <exec_depend>robot_localization</exec_depend>
 
   <!-- Real hardware dependencies -->
   <exec_depend>sllidar_ros2</exec_depend>

@@ -41,6 +41,8 @@ install(
   PROGRAMS
     scripts/diff_drive_node.py
     scripts/joystick_teleop_node.py
+    scripts/imu_calibration_node.py
+    scripts/imu_check_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
