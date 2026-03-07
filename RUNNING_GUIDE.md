@@ -299,17 +299,17 @@ File: `config/nav2_params_hardware.yaml`
 | Parameter | Current | Description |
 |-----------|---------|-------------|
 | `FollowPath.desired_linear_vel` | 0.20 m/s | Main forward speed during autonomous navigation |
-| `FollowPath.rotate_to_heading_angular_vel` | 0.6 rad/s | Rotation speed when turning to face goal |
+| `FollowPath.rotate_to_heading_angular_vel` | 0.8 rad/s | Rotation speed when turning to face goal (~88% accurate) |
 | `FollowPath.min_approach_linear_velocity` | 0.02 m/s | Minimum speed when approaching goal |
 | `FollowPath.regulated_linear_scaling_min_speed` | 0.05 m/s | Minimum speed during regulated scaling |
-| `FollowPath.max_angular_accel` | 1.2 rad/s² | Maximum angular acceleration |
-| `velocity_smoother.max_velocity` | [0.25, 0.0, 0.8] | Hard speed limits [linear, lateral, angular] |
+| `FollowPath.max_angular_accel` | 0.8 rad/s² | Maximum angular acceleration |
+| `velocity_smoother.max_velocity` | [0.20, 0.0, 0.8] | Hard speed limits [linear, lateral, angular] |
 | `velocity_smoother.min_velocity` | [-0.20, 0.0, -0.8] | Reverse speed limits |
-| `velocity_smoother.max_accel` | [0.8, 0.0, 1.2] | Acceleration limits |
+| `velocity_smoother.max_accel` | [0.6, 0.0, 1.0] | Acceleration limits |
 | `velocity_smoother.max_decel` | [-0.8, 0.0, -1.2] | Deceleration limits |
 | `velocity_smoother.deadband_velocity` | [0.01, 0.0, 0.05] | Below this = send zero (filters noise) |
-| `behavior_server.max_rotational_vel` | 0.5 rad/s | Max rotation for recovery behaviors |
-| `behavior_server.min_rotational_vel` | 0.15 rad/s | Min rotation for recovery behaviors |
+| `behavior_server.max_rotational_vel` | 0.8 rad/s | Max rotation for recovery behaviors |
+| `behavior_server.min_rotational_vel` | 0.4 rad/s | Min rotation — motors unreliable below ~0.42 rad/s |
 | `behavior_server.rotational_acc_lim` | 1.0 rad/s² | Rotational acceleration limit |
 
 ### Hardware Speed Limit
@@ -317,7 +317,7 @@ File: `scripts/diff_drive_node.py` and `launch/bringup_hardware.launch.py`
 
 | Parameter | Current | Description |
 |-----------|---------|-------------|
-| `max_motor_speed` | 0.47 m/s | Physical max: 130 RPM × π × 0.069m (do NOT exceed this) |
+| `max_motor_speed` | 0.391 m/s | Calibrated max: measured via raw PWM at 48 ticks/50ms × wheel geometry |
 
 ---
 
@@ -393,6 +393,55 @@ ros2 run tf2_tools view_frames
 # ──────────────────────────────────────────────────────────
 ros2 run Tomas_bot imu_check_node.py
 ros2 run Tomas_bot imu_calibration_node.py
+```
+
+---
+
+## 7. Motor Calibration Reference
+
+The motor system has been calibrated with the following key parameters:
+
+### Arduino Firmware (`firmware/motor_controller/motor_controller.ino`)
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `MAX_TICKS_PER_INTERVAL` | 48 | Ticks per 50ms at full PWM (measured via raw PWM mode) |
+| `MIN_PWM` | 25 | Minimum PWM to overcome motor stiction |
+| `KP` | 1.0 | PID proportional gain |
+| `KI` | 0.8 | PID integral gain |
+| `KD` | 0.15 | PID derivative gain |
+| `INTEGRAL_LIMIT` | 150 | Anti-windup clamp |
+| `PID_INTERVAL_MS` | 50 | PID update interval (with dt normalization) |
+
+### Python Node (`scripts/diff_drive_node.py`)
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `max_motor_speed` | 0.391 m/s | Calibrated from 48 ticks/50ms × wheel geometry |
+| `min_pwm` | 25 | Must match Arduino `MIN_PWM` |
+| `wheel_separation` | 0.181 m | Center-to-center wheel distance |
+| `wheel_radius` | 0.0345 m | 69mm wheels |
+| `ticks_per_rev` | 528 | 11 PPR × 48:1 gear ratio |
+
+### Hardware Limitations
+
+- **Minimum sustainable wheel speed:** ~0.038 m/s (at PWM 25)
+- **Minimum reliable angular velocity:** ~0.42 rad/s (below this, motors duty-cycle between ON/OFF)
+- **Encoder resolution:** 528 ticks/rev → 0.41mm per tick
+
+### Recalibrating Motor Speed
+
+If you change motors, wheels, or battery voltage:
+
+```bash
+# 1. Connect to Arduino serial (115200 baud)
+# 2. Send raw PWM command to bypass PID:
+#    w 255 255    (both motors full speed forward)
+# 3. Read tick counts over 3 seconds from 'e' messages
+# 4. Calculate: max_ticks_per_50ms = total_ticks / (3000 / 50)
+# 5. Calculate: max_motor_speed = (max_ticks / 528) × 2π × 0.0345 / 0.050
+# 6. Update MAX_TICKS_PER_INTERVAL in firmware and max_motor_speed in launch file
+# 7. Rebuild and re-upload
 ```
 
 ---

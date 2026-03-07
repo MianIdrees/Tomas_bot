@@ -114,7 +114,7 @@ controller_server:
       min_lookahead_dist: 0.25
       max_lookahead_dist: 0.8
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.6   # [SPEED][TURNING] PWM ~49/wheel — reliably above Arduino MIN_PWM=35
+      rotate_to_heading_angular_vel: 0.8   # [SPEED][TURNING] PWM ~47/wheel — 91% accurate at this speed
       rotate_to_heading_min_angle: 0.7     # [TURNING] ~23° — in-place turn for moderate heading errors
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: false
@@ -176,8 +176,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.2            # [SPEED] Recovery spin speed
-    min_rotational_vel: 0.15            # [SPEED] Fine angular correction minimum
+    max_rotational_vel: 0.8            # [SPEED] Recovery spin speed — matches RPP rotate_to_heading
+    min_rotational_vel: 0.4            # [SPEED] Min angular — motors unreliable below ~0.42 rad/s (PWM dead-zone)
     rotational_acc_lim: 1.0            # [SPEED] Angular acceleration for recovery behaviors
 
 waypoint_follower:
@@ -198,7 +198,7 @@ velocity_smoother:
     smoothing_frequency: 10.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.2, 0.0, 0.6]     # [SPEED] Max linear 0.25, angular 0.8 rad/s
+    max_velocity: [0.2, 0.0, 0.8]     # [SPEED] Max linear 0.2 m/s, angular 0.8 rad/s
     min_velocity: [-0.20, 0.0, -0.8]   # [SPEED] Reverse limits
     max_accel: [0.6, 0.0, 1.0]         # [SPEED] Responsive — PWM ramping in diff_drive handles smoothing
     max_decel: [-0.8, 0.0, -1.2]       # [SPEED] Responsive deceleration

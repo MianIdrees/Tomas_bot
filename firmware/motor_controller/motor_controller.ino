@@ -1,4 +1,4 @@
-/*
+/* code updated
  * ============================================================================
  * Arduino Leonardo — Motor + Encoder + BNO085 IMU Controller for ROS2
  * ============================================================================
@@ -201,17 +201,17 @@ static void bno_enableReport(uint8_t reportId, uint32_t interval_us) {
  *   Set LEFT_MAX_TICKS and RIGHT_MAX_TICKS accordingly.
  *   Start with conservative estimates and tune.
  */
-#define MAX_TICKS_PER_INTERVAL  40    // Target scaling (use slower motor's value)
-#define LEFT_MAX_TICKS          40    // Measured: left motor ticks at PWM 255 per interval
-#define RIGHT_MAX_TICKS         40    // Measured: right motor ticks at PWM 255 per interval
+#define MAX_TICKS_PER_INTERVAL  48    // Target scaling (measured at raw PWM 255, 3s avg)
+#define LEFT_MAX_TICKS          48    // Measured: left motor ticks at raw PWM 255 per 50ms
+#define RIGHT_MAX_TICKS         48    // Measured: right motor ticks at raw PWM 255 per 50ms
 
 // Minimum PWM to overcome motor stiction and L298N voltage drop
-#define MIN_PWM  35
+#define MIN_PWM  25
 
 // PID gains — start conservative, tune on real hardware
-#define KP   0.8
-#define KI   1.0
-#define KD   0.05
+#define KP   1.0
+#define KI   0.8
+#define KD   0.15
 #define INTEGRAL_LIMIT  150.0
 
 // Target ramping for smooth acceleration
@@ -234,15 +234,16 @@ long prev_left_ticks  = 0;
 long prev_right_ticks = 0;
 
 int debug_countdown = 0;
+bool raw_pwm_mode = false;  // 'w' command bypasses PID
 
 // ========================== ENCODER STATE ==========================
 
-// Left encoder — updated by hardware interrupt
+// Left encoder — updated by hardware interrupt (INT3 on D1)
 volatile long left_ticks  = 0;
 
-// Right encoder — updated by polling in loop()
+// Right encoder — updated by Pin Change Interrupt (PCINT1 on A4)
+// ATmega32U4: A4 = PF1 = PCINT1 (PCINT0 group covers PF0-PF7)
 volatile long right_ticks = 0;
-byte right_enc_a_last = LOW;  // Previous state of right encoder channel A
 
 // ========================== TIMING ==========================
 
@@ -339,15 +340,17 @@ void readIMU() {
                 imu_az = az / 256.0f;
                 pos += 10;
             }
-            else if (id == SH2_GYROSCOPE_CALIBRATED && pos + 16 <= len) {
-                // 4-byte header + 6 bytes gyro data + 6 bytes bias (16 total)
+            else if (id == SH2_GYROSCOPE_CALIBRATED && pos + 10 <= len) {
+                // 4-byte header + 6 bytes gyro data (10 bytes total)
+                // Note: Only the Uncalibrated Gyroscope (0x07) has bias fields (16 bytes).
+                //       The Calibrated Gyroscope (0x02) is 10 bytes.
                 int16_t gx = (int16_t)((uint16_t)bno_buf[pos+4] | ((uint16_t)bno_buf[pos+5] << 8));
                 int16_t gy = (int16_t)((uint16_t)bno_buf[pos+6] | ((uint16_t)bno_buf[pos+7] << 8));
                 int16_t gz = (int16_t)((uint16_t)bno_buf[pos+8] | ((uint16_t)bno_buf[pos+9] << 8));
                 imu_gx = gx / 512.0f;  // Q9, rad/s
                 imu_gy = gy / 512.0f;
                 imu_gz = gz / 512.0f;
-                pos += 16;  // Skip full report including 6 bias bytes
+                pos += 10;
             }
             else {
                 break;  // Unknown report or not enough data
@@ -378,26 +381,32 @@ void publishIMU() {
 
 void leftEncoderISR() {
     if (digitalRead(LEFT_ENC_B) == HIGH) {
-        left_ticks++;
-    } else {
         left_ticks--;
+    } else {
+        left_ticks++;
     }
 }
 
-// ========================== RIGHT ENCODER POLLING ==========================
-// Called every loop() iteration — checks for RISING edge on A4
+// ========================== RIGHT ENCODER — TIMER1 ISR POLLING ==========================
+// ATmega32U4 has NO Pin Change Interrupts on Port F (A4/A5).
+// (PCINT0 group covers Port B only — different from ATmega328P!)
+// Instead, we use Timer1 Compare Match A to poll A4 at ~2 kHz,
+// fast enough to catch every encoder edge even during blocking I2C.
+// Timer1 is free on Leonardo when pins 9/10 are used as digital outputs.
 
-void pollRightEncoder() {
-    byte current = digitalRead(RIGHT_ENC_A);
-    if (current == HIGH && right_enc_a_last == LOW) {
-        // Rising edge detected
-        if (digitalRead(RIGHT_ENC_B) == HIGH) {
-            right_ticks++;
-        } else {
+static volatile uint8_t right_enc_a_prev = 0;
+
+ISR(TIMER1_COMPA_vect) {
+    uint8_t current = PINF & _BV(PF1);  // Read A4 (PF1)
+    if (current && !right_enc_a_prev) {
+        // Rising edge — check A5 (PF0) for direction
+        if (PINF & _BV(PF0)) {
             right_ticks--;
+        } else {
+            right_ticks++;
         }
     }
-    right_enc_a_last = current;
+    right_enc_a_prev = current;
 }
 
 // ========================== MOTOR CONTROL ==========================
@@ -424,6 +433,7 @@ void setMotors(int left_pwm, int right_pwm) {
 }
 
 void stopMotors() {
+    raw_pwm_mode = false;
     left_pid.target = 0;
     left_pid.cmd_target = 0;
     left_pid.integral = 0;
@@ -440,7 +450,7 @@ void stopMotors() {
 // ========================== PID UPDATE ==========================
 
 void updateMotorPID(MotorPID &pid, long delta_ticks, int motor_max_ticks,
-                    int ena_pin, int in1_pin, int in2_pin) {
+                    int ena_pin, int in1_pin, int in2_pin, unsigned long dt_ms) {
     // Ramp target toward cmd_target
     bool is_ramping = false;
     if (pid.target < pid.cmd_target - 0.5f) {
@@ -470,8 +480,13 @@ void updateMotorPID(MotorPID &pid, long delta_ticks, int motor_max_ticks,
         return;
     }
 
-    // Compute error
+    // Normalize measurement to nominal PID interval.
+    // If readIMU() blocking extended this interval, scale ticks down so
+    // the PID doesn't think the motor is going too fast.
     float actual = (float)delta_ticks;
+    if (dt_ms > 0 && dt_ms != PID_INTERVAL_MS) {
+        actual = actual * (float)PID_INTERVAL_MS / (float)dt_ms;
+    }
     float error = pid.target - actual;
 
     // Derivative
@@ -506,14 +521,38 @@ void updateMotorPID(MotorPID &pid, long delta_ticks, int motor_max_ticks,
     if (pid.output_pwm > 255)  pid.output_pwm = 255;
     if (pid.output_pwm < -255) pid.output_pwm = -255;
 
-    // Dead-zone compensation
-    if (pid.output_pwm > 0 && pid.output_pwm < MIN_PWM) pid.output_pwm = MIN_PWM;
-    if (pid.output_pwm < 0 && pid.output_pwm > -MIN_PWM) pid.output_pwm = -MIN_PWM;
+    // Dead-zone compensation: only boost to MIN_PWM when the PID is trying
+    // to produce motion (feedforward >= MIN_PWM) or when undershooting (error > 0).
+    // For very low targets where feedforward < MIN_PWM, let the PID output
+    // drop to 0 when overshooting — this creates natural duty-cycling between
+    // 0 and MIN_PWM that averages to the correct speed.
+    if (pid.output_pwm > 0 && pid.output_pwm < MIN_PWM) {
+        if (feedforward >= MIN_PWM || error > 0) {
+            pid.output_pwm = MIN_PWM;
+        } else {
+            pid.output_pwm = 0;
+        }
+    }
+    if (pid.output_pwm < 0 && pid.output_pwm > -MIN_PWM) {
+        if (feedforward <= -MIN_PWM || error < 0) {
+            pid.output_pwm = -MIN_PWM;
+        } else {
+            pid.output_pwm = 0;
+        }
+    }
 
     setMotor(pid.output_pwm, ena_pin, in1_pin, in2_pin);
 }
 
 void updatePID() {
+    if (raw_pwm_mode) return;  // Skip PID in raw PWM mode
+
+    // Compute actual elapsed time since last PID update.
+    // readIMU() I2C blocking can stretch intervals beyond 50ms.
+    unsigned long now = millis();
+    unsigned long dt_ms = now - last_pid_time;
+    last_pid_time = now;
+
     noInterrupts();
     long l = left_ticks;
     long r = right_ticks;
@@ -525,9 +564,9 @@ void updatePID() {
     prev_right_ticks = r;
 
     updateMotorPID(left_pid,  delta_left,  LEFT_MAX_TICKS,
-                   LEFT_ENA,  LEFT_IN1,  LEFT_IN2);
+                   LEFT_ENA,  LEFT_IN1,  LEFT_IN2, dt_ms);
     updateMotorPID(right_pid, delta_right, RIGHT_MAX_TICKS,
-                   RIGHT_ENB, RIGHT_IN3, RIGHT_IN4);
+                   RIGHT_ENB, RIGHT_IN3, RIGHT_IN4, dt_ms);
 
     // Debug output
     if (debug_countdown > 0) {
@@ -555,12 +594,23 @@ void updatePID() {
 
 void processCommand(const char* cmd) {
     if (cmd[0] == 'm') {
+        raw_pwm_mode = false;
         int left_pwm = 0, right_pwm = 0;
         if (sscanf(cmd + 1, "%d %d", &left_pwm, &right_pwm) == 2) {
             left_pwm  = constrain(left_pwm,  -255, 255);
             right_pwm = constrain(right_pwm, -255, 255);
             left_pid.cmd_target  = (left_pwm  / 255.0f) * MAX_TICKS_PER_INTERVAL;
             right_pid.cmd_target = (right_pwm / 255.0f) * MAX_TICKS_PER_INTERVAL;
+            last_cmd_time = millis();
+        }
+    } else if (cmd[0] == 'w') {
+        // Raw PWM mode — bypass PID, drive motors directly (for calibration)
+        int left_pwm = 0, right_pwm = 0;
+        if (sscanf(cmd + 1, "%d %d", &left_pwm, &right_pwm) == 2) {
+            raw_pwm_mode = true;
+            left_pwm  = constrain(left_pwm,  -255, 255);
+            right_pwm = constrain(right_pwm, -255, 255);
+            setMotors(left_pwm, right_pwm);
             last_cmd_time = millis();
         }
     } else if (cmd[0] == 'r') {
@@ -636,14 +686,20 @@ void setup() {
     pinMode(RIGHT_ENC_A, INPUT_PULLUP);
     pinMode(RIGHT_ENC_B, INPUT_PULLUP);
 
-    // Initialize right encoder last state for polling
-    right_enc_a_last = digitalRead(RIGHT_ENC_A);
+    // Initialize right encoder previous state
+    right_enc_a_prev = (PINF & _BV(PF1)) ? 1 : 0;
 
     // Attach hardware interrupt for left encoder (D1 = INT3 on Leonardo)
     attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
 
-    // NOTE: Right encoder on A4/A5 does not support hardware interrupts
-    // on ATmega32U4 (Leonardo). It is polled in loop() instead.
+    // Setup Timer1 CTC mode for right encoder polling at ~8 kHz
+    // ATmega32U4 @ 16MHz: prescaler=8 → 2MHz tick, OCR1A=249 → 8kHz ISR
+    noInterrupts();
+    TCCR1A = 0;                        // CTC mode (WGM12 in TCCR1B)
+    TCCR1B = _BV(WGM12) | _BV(CS11);  // CTC + prescaler /8
+    OCR1A  = 249;                      // 16MHz/8/250 = 8kHz
+    TIMSK1 = _BV(OCIE1A);             // Enable Compare Match A interrupt
+    interrupts();
 
     stopMotors();
 
@@ -655,11 +711,10 @@ void setup() {
 }
 
 void loop() {
-    // Poll right encoder every loop iteration for reliable detection
-    pollRightEncoder();
-
-    // Read IMU data (non-blocking)
-    readIMU();
+    // Both encoders are now interrupt-driven:
+    //   Left:  hardware INT3 on D1
+    //   Right: Timer1 ISR polling A4 at 2kHz
+    // No manual polling needed — loop can safely do blocking I2C reads.
 
     // Process incoming serial commands
     readSerial();
@@ -671,8 +726,7 @@ void loop() {
 
     // PID speed control update
     if (millis() - last_pid_time >= PID_INTERVAL_MS) {
-        updatePID();
-        last_pid_time = millis();
+        updatePID();  // updatePID() sets last_pid_time internally
     }
 
     // Publish encoder ticks
@@ -681,8 +735,9 @@ void loop() {
         last_publish_time = millis();
     }
 
-    // Publish IMU data
+    // Read and publish IMU data — only when it's time to publish.
     if (millis() - last_imu_publish_time >= IMU_PUBLISH_INTERVAL_MS) {
+        readIMU();
         publishIMU();
         last_imu_publish_time = millis();
     }

@@ -23,7 +23,7 @@ Differential drive mobile robot running ROS2 Jazzy on LattePanda Alpha (Core i5)
 | Wheel Diameter | 69 mm |
 | Wheel Width | 26 mm |
 | Wheel Separation (center-to-center) | 181 mm |
-| Max Linear Velocity | ~0.47 m/s |
+| Max Linear Velocity | ~0.39 m/s (calibrated) |
 | LiDAR Range | 0.15 – 8 m |
 | IMU Update Rate | 20 Hz |
 | EKF Output Rate | 30 Hz |
@@ -128,6 +128,19 @@ ros2 topic hz /scan            # ~10 Hz (RPLidar C1)
 ros2 run tf2_tools view_frames
 # Expected: map → odom → base_link → chassis → imu_link / laser_frame / wheels
 ```
+
+## Calibration Results
+
+Measured accuracy with PID motor control and EKF sensor fusion:
+
+| Test | Command | Expected | Actual | Error |
+|------|---------|----------|--------|-------|
+| Forward | 0.15 m/s × 3s | 0.45 m | 0.47 m | +4.4% |
+| Backward | 0.10 m/s × 3s | 0.30 m | 0.30 m | -0.2% |
+| Rotate (0.8 rad/s) | 0.8 rad/s × 2s | 91.7° | 80° | -12° (88%) |
+| Rotate (0.5 rad/s) | 0.5 rad/s × 2s | 57.3° | 38° | -19° (66%) |
+
+> **Note:** Rotation accuracy is limited by motor stiction at low PWM. Nav2 uses ≥0.8 rad/s for in-place turns where accuracy is ~88%. The IMU+EKF fusion compensates for rotation errors during navigation.
 
 ## Documentation
 

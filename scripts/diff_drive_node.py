@@ -51,8 +51,8 @@ class DiffDriveNode(Node):
         self.declare_parameter('wheel_separation', 0.181)  # Center-to-center: 181mm
         self.declare_parameter('wheel_radius', 0.0345)     # 69mm wheels
         self.declare_parameter('ticks_per_rev', 528.0)     # 11 PPR x 48:1 gear (CALIBRATE)
-        self.declare_parameter('max_motor_speed', 0.47)    # [SPEED] Hardware max: 130 RPM × π × 0.069m ≈ 0.47 m/s
-        self.declare_parameter('min_pwm', 35)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
+        self.declare_parameter('max_motor_speed', 0.391)   # [SPEED] Measured: ~48 ticks/50ms × 20Hz × 0.000411 m/tick (raw PWM 255)
+        self.declare_parameter('min_pwm', 25)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
         self.declare_parameter('angular_deadband', 0.05)     # rad/s — filter only jitter, allow real turn commands through
         self.declare_parameter('pwm_ramp_rate', 50)          # Max PWM change per cmd_vel cycle (near-instant; Arduino PID handles smooth accel)
         self.declare_parameter('odom_frame', 'odom')
@@ -162,24 +162,13 @@ class DiffDriveNode(Node):
             self.ser = None
 
     def cmd_vel_callback(self, msg: Twist):
-        """Convert cmd_vel to motor PWM commands with 3-layer intelligent control.
+        """Convert cmd_vel to motor PWM commands.
 
-        The layers work together to produce smooth, reliable motion:
-
-        Layer 1 — Deadband: Filters tiny jitter commands (< 0.03 rad/s angular,
-          < 0.01 m/s linear) that cause goal oscillation. The velocity_smoother
-          also filters angular < 0.05 rad/s, so this mainly catches teleop noise.
-
-        Layer 2 — Rescale: Maps raw PWM [1..255] → [min_pwm..255] so that ANY
-          non-zero command produces enough voltage to overcome motor stiction.
-          Without this, turn commands (which only need ~49 PWM per wheel) pass
-          through the velocity_smoother ramp as 5→11→17→... and those low values
-          produce Arduino PID targets of 1-3 ticks — too low for reliable control.
-
-        Layer 3 — Ramp: Limits how fast the rescaled PWM changes per cycle.
-          This prevents jerky starts. Stopping is IMMEDIATE (no ramp delay).
-          Because ramping operates on rescaled values, even the first ramp step
-          (e.g., 30 PWM) is above the motor's working threshold.
+        Pipeline:
+        1. Deadband: Filter jitter (< 0.05 rad/s angular, < 0.01 m/s linear)
+        2. Inverse kinematics: cmd_vel → per-wheel velocities → raw PWM
+        3. Ramp: Limit PWM change per cycle for smooth acceleration
+        4. Arduino PID handles dead-zone compensation and speed tracking
         """
         self.last_cmd_time = self.get_clock().now()
 
@@ -204,11 +193,7 @@ class DiffDriveNode(Node):
         left_pwm = max(-255, min(255, left_pwm))
         right_pwm = max(-255, min(255, right_pwm))
 
-        # --- Layer 2: Rescale into motor's working range ---
-        left_pwm = self._rescale_pwm(left_pwm)
-        right_pwm = self._rescale_pwm(right_pwm)
-
-        # --- Layer 3: Smooth ramp (operates on rescaled values) ---
+        # --- Smooth ramp ---
         left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm)
         right_pwm = self._ramp_pwm(right_pwm, self.last_right_pwm)
 
@@ -226,6 +211,18 @@ class DiffDriveNode(Node):
                     f'[PWM] cmd_vel: v={v:.3f} w={w:.3f} → '
                     f'PWM L={left_pwm} R={right_pwm}'
                 )
+
+    def _apply_min_pwm(self, pwm):
+        """Clamp non-zero PWM to at least ±min_pwm.
+
+        This ensures the Arduino PID always gets a target above the motor's
+        dead-zone. Unlike rescaling (which inflated ALL values proportionally),
+        this only affects very low PWM values — higher values pass through unchanged.
+        """
+        if pwm == 0:
+            return 0
+        sign = 1 if pwm > 0 else -1
+        return sign * max(abs(pwm), self.min_pwm)
 
     def _rescale_pwm(self, pwm):
         """Map [1..255] → [min_pwm..255] so any command moves the motor.
@@ -248,10 +245,6 @@ class DiffDriveNode(Node):
     def _ramp_pwm(self, target, current):
         """Limit PWM change per cycle for smooth acceleration.
 
-        Operates on rescaled values so even the first ramp step is above
-        the motor's working threshold. At 10Hz smoother rate with ramp=30:
-          0→77 PWM (turn) ramps in ~0.3s: 0→30→60→77
-          0→77 only takes 3 cycles because rescale ensures values above 35.
         Stopping is IMMEDIATE — no delay when Nav2 says stop.
         """
         if target == 0:
@@ -301,9 +294,7 @@ class DiffDriveNode(Node):
                 if len(parts) == 3:
                     left_ticks = int(parts[1])
                     right_ticks = int(parts[2])
-                    # Negate both encoders: hardware wiring gives inverted sign
-                    # (forward motion produces negative ticks from Arduino)
-                    return (-left_ticks, -right_ticks)
+                    return (left_ticks, right_ticks)
         except (serial.SerialException, ValueError, UnicodeDecodeError) as e:
             self.get_logger().warn(f'Serial read error: {e}')
 

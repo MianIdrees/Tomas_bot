@@ -95,7 +95,7 @@ def generate_launch_description():
             'wheel_separation': 0.181,     # Center-to-center: 181mm
             'wheel_radius': 0.0345,        # 69mm wheels
             'ticks_per_rev': LaunchConfiguration('ticks_per_rev'),
-            'max_motor_speed': 0.47,       # 130 RPM × π × 0.069m
+            'max_motor_speed': 0.391,      # Measured: 48 ticks/50ms × 20Hz × 0.000411 m/tick (raw PWM 255)
             'odom_frame': 'odom',
             'base_frame': 'base_link',
             'publish_tf': False,           # EKF publishes odom→base_link TF

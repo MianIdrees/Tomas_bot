@@ -56,7 +56,7 @@ class JoystickTeleopNode(Node):
 
         # ========================== PARAMETERS ==========================
         # --- Speed Limits (match robot hardware) ---
-        self.declare_parameter('max_linear_speed', 0.47)       # m/s (130 RPM motor max)
+        self.declare_parameter('max_linear_speed', 0.391)       # m/s (measured motor max)
         self.declare_parameter('max_angular_speed', 2.5)       # rad/s (needs to be high due to small wheel separation)
         self.declare_parameter('normal_linear_scale', 0.3)     # 30% of max in normal mode
         self.declare_parameter('normal_angular_scale', 0.5)    # 50% of max in normal mode
