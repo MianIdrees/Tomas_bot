@@ -143,13 +143,11 @@ The IMU should be mounted:
 
 ## 2. Arduino Firmware Setup
 
-### Install BNO085 Arduino Library
+### ~~Install BNO085 Arduino Library~~ (No longer needed)
 
-1. Open Arduino IDE
-2. Go to **Tools → Manage Libraries...** (or **Sketch → Include Library → Manage Libraries...**)
-3. Search for **"Adafruit BNO08x"**
-4. Install **Adafruit BNO08x** (this also installs `Adafruit BusIO` and `Adafruit Unified Sensor` dependencies)
-5. Also verify **Wire** library is available (built-in)
+> **The firmware now uses a minimal built-in SHTP I2C driver** instead of the Adafruit BNO08x library.
+> This was necessary because the Adafruit library's SH2 buffers exceed the ATmega32U4's 2.5KB SRAM.
+> The only Arduino library dependency is **Wire** (built-in). No external libraries need to be installed.
 
 ### Upload Firmware
 
@@ -438,7 +436,7 @@ ros2 run tf2_tools view_frames
 | I²C address | Run I²C scanner sketch — should find 0x4A |
 | Power | Is VIN getting 5V? (measure with multimeter) |
 | Solder joints | Cold joints on breakout board headers? |
-| Library | Adafruit BNO08x installed in Arduino IDE? |
+| Firmware | Verify the firmware uploaded successfully (no compile errors) |
 
 ### IMU Data but No /imu/data Topic
 

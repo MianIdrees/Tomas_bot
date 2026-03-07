@@ -17,6 +17,7 @@
  * IMU: Adafruit BNO085 (9-DOF) via I²C
  *   - I²C Address: 0x4A (default)
  *   - Reports: Game Rotation Vector + Gyroscope + Accelerometer
+ *   - Uses minimal SHTP I2C driver (NOT Adafruit library — saves ~1KB SRAM)
  *
  * Pin Assignments:
  *   L298N Motor Driver:
@@ -65,7 +66,98 @@
  */
 
 #include <Wire.h>
-#include <Adafruit_BNO08x.h>
+
+// Forward declaration for Arduino auto-prototype generation
+struct MotorPID;
+
+// ========================== MINIMAL BNO085 SHTP I2C DRIVER ==========================
+// Replaces the Adafruit_BNO08x library to fit within ATmega32U4's 2.5KB SRAM.
+// Only implements: reset, enable 3 reports, read 3 report types.
+// SHTP = Sensor Hub Transport Protocol (Hillcrest/CEVA)
+
+#define BNO085_I2C_ADDR  0x4A
+
+// SHTP channel numbers
+#define SHTP_CHAN_COMMAND   0
+#define SHTP_CHAN_EXE       1
+#define SHTP_CHAN_CONTROL   2
+#define SHTP_CHAN_REPORTS   3
+
+// SH2 report IDs
+#define SH2_TIMESTAMP_REBASE       0xFB
+#define SH2_SET_FEATURE_CMD        0xFD
+#define SH2_ACCELEROMETER          0x01
+#define SH2_GYROSCOPE_CALIBRATED   0x02
+#define SH2_GAME_ROTATION_VECTOR   0x08
+
+// Shared I2C read buffer (28 payload + 4 header = 32 = AVR Wire max)
+#define BNO_BUF_SIZE  32
+static uint8_t bno_buf[BNO_BUF_SIZE];
+static uint8_t bno_seq[4];  // Per-channel SHTP sequence numbers
+
+// Send an SHTP packet to the BNO085
+static bool bno_sendPacket(uint8_t channel, const uint8_t *data, uint8_t dataLen) {
+    uint16_t totalLen = dataLen + 4;
+    Wire.beginTransmission(BNO085_I2C_ADDR);
+    Wire.write((uint8_t)(totalLen & 0xFF));
+    Wire.write((uint8_t)(totalLen >> 8));
+    Wire.write(channel);
+    Wire.write(bno_seq[channel]++);
+    for (uint8_t i = 0; i < dataLen; i++) {
+        Wire.write(data[i]);
+    }
+    return (Wire.endTransmission() == 0);
+}
+
+// Read one SHTP packet. Returns payload length on sensor report channel, 0 otherwise.
+// Payload data is stored in bno_buf[0..N-1].
+static uint8_t bno_readPacket() {
+    uint8_t n = Wire.requestFrom((uint8_t)BNO085_I2C_ADDR, (uint8_t)BNO_BUF_SIZE);
+    if (n < 4) {
+        while (Wire.available()) Wire.read();
+        return 0;
+    }
+
+    uint8_t len_lo  = Wire.read();
+    uint8_t len_hi  = Wire.read();
+    uint8_t channel = Wire.read();
+    /*uint8_t seq =*/ Wire.read();
+
+    uint16_t pktLen = ((uint16_t)(len_hi & 0x7F) << 8) | len_lo;
+    if (pktLen < 5 || pktLen > 300) {
+        while (Wire.available()) Wire.read();
+        return 0;
+    }
+
+    uint8_t available = n - 4;
+    uint16_t dataLen  = pktLen - 4;
+    uint8_t toRead = (available < dataLen) ? available : (uint8_t)dataLen;
+    if (toRead > BNO_BUF_SIZE) toRead = BNO_BUF_SIZE;
+
+    for (uint8_t i = 0; i < toRead; i++) {
+        bno_buf[i] = Wire.read();
+    }
+    while (Wire.available()) Wire.read();
+
+    // Only return data for sensor report channel
+    if (channel != SHTP_CHAN_REPORTS) return 0;
+    return toRead;
+}
+
+// Enable a sensor report at a given interval (microseconds)
+static void bno_enableReport(uint8_t reportId, uint32_t interval_us) {
+    uint8_t cmd[17];
+    memset(cmd, 0, 17);
+    cmd[0] = SH2_SET_FEATURE_CMD;
+    cmd[1] = reportId;
+    // Bytes 2-4: flags + change sensitivity = 0
+    cmd[5] = (uint8_t)(interval_us & 0xFF);
+    cmd[6] = (uint8_t)((interval_us >> 8) & 0xFF);
+    cmd[7] = (uint8_t)((interval_us >> 16) & 0xFF);
+    cmd[8] = (uint8_t)((interval_us >> 24) & 0xFF);
+    // Bytes 9-16: batch interval + sensor config = 0
+    bno_sendPacket(SHTP_CHAN_CONTROL, cmd, 17);
+}
 
 // ========================== PIN DEFINITIONS ==========================
 
@@ -96,7 +188,7 @@
 #define PUBLISH_INTERVAL_MS    50   // Encoder data publish rate (20 Hz)
 #define PID_INTERVAL_MS        50   // PID update rate
 #define CMD_TIMEOUT_MS        500   // Stop motors if no command for 500ms
-#define SERIAL_BUF_SIZE        64
+#define SERIAL_BUF_SIZE        32
 
 // ========================== PID SPEED CONTROL ==========================
 /*
@@ -165,8 +257,6 @@ int  serial_idx = 0;
 
 // ========================== BNO085 IMU STATE ==========================
 
-Adafruit_BNO08x bno08x(BNO085_INT_PIN);
-sh2_SensorValue_t imu_value;
 bool imu_available = false;
 
 // Latest IMU readings
@@ -178,49 +268,90 @@ unsigned long last_imu_publish_time = 0;
 #define IMU_PUBLISH_INTERVAL_MS  50  // 20 Hz, aligned with encoder rate
 
 void initIMU() {
-    if (!bno08x.begin_I2C(0x4A)) {
-        Serial.println("! BNO085 not detected on I2C 0x4A");
+    // Check if BNO085 is on the I²C bus
+    Wire.beginTransmission(BNO085_I2C_ADDR);
+    if (Wire.endTransmission() != 0) {
+        Serial.println(F("! BNO085 not detected on I2C 0x4A"));
         imu_available = false;
         return;
     }
-    imu_available = true;
-    Serial.println("BNO085 found on I2C 0x4A");
 
-    // Enable reports: game rotation vector, accelerometer, gyroscope
-    if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 50000)) {  // 50ms = 20Hz
-        Serial.println("! Failed to enable Game Rotation Vector");
+    // Soft reset: send reset command on executable channel
+    uint8_t resetCmd = 1;
+    bno_sendPacket(SHTP_CHAN_EXE, &resetCmd, 1);
+    delay(300);
+
+    // Flush boot advertisement and initialization packets
+    for (uint8_t i = 0; i < 20; i++) {
+        bno_readPacket();
+        delay(20);
     }
-    if (!bno08x.enableReport(SH2_ACCELEROMETER, 50000)) {
-        Serial.println("! Failed to enable Accelerometer");
-    }
-    if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 50000)) {
-        Serial.println("! Failed to enable Gyroscope");
-    }
-    Serial.println("BNO085 reports enabled (RotVec+Accel+Gyro @20Hz)");
+
+    Serial.println(F("BNO085 found on I2C 0x4A"));
+
+    // Enable the 3 reports we need at 20Hz (50000 µs interval)
+    bno_enableReport(SH2_GAME_ROTATION_VECTOR, 50000);
+    delay(20);
+    bno_enableReport(SH2_ACCELEROMETER, 50000);
+    delay(20);
+    bno_enableReport(SH2_GYROSCOPE_CALIBRATED, 50000);
+    delay(20);
+
+    imu_available = true;
+    Serial.println(F("BNO085 reports enabled (RotVec+Accel+Gyro @20Hz)"));
 }
 
 void readIMU() {
     if (!imu_available) return;
 
-    // Read all available sensor events
-    while (bno08x.getSensorEvent(&imu_value)) {
-        switch (imu_value.sensorId) {
-            case SH2_GAME_ROTATION_VECTOR:
-                imu_qw = imu_value.un.gameRotationVector.real;
-                imu_qx = imu_value.un.gameRotationVector.i;
-                imu_qy = imu_value.un.gameRotationVector.j;
-                imu_qz = imu_value.un.gameRotationVector.k;
-                break;
-            case SH2_ACCELEROMETER:
-                imu_ax = imu_value.un.accelerometer.x;
-                imu_ay = imu_value.un.accelerometer.y;
-                imu_az = imu_value.un.accelerometer.z;
-                break;
-            case SH2_GYROSCOPE_CALIBRATED:
-                imu_gx = imu_value.un.gyroscope.x;
-                imu_gy = imu_value.un.gyroscope.y;
-                imu_gz = imu_value.un.gyroscope.z;
-                break;
+    // Read up to 3 packets per call (one per report type at most)
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+        uint8_t len = bno_readPacket();
+        if (len == 0) break;
+
+        // Parse sensor reports from payload
+        uint8_t pos = 0;
+        while (pos < len) {
+            uint8_t id = bno_buf[pos];
+
+            if (id == SH2_TIMESTAMP_REBASE && pos + 5 <= len) {
+                pos += 5;  // Skip 5-byte timestamp rebase
+            }
+            else if (id == SH2_GAME_ROTATION_VECTOR && pos + 12 <= len) {
+                // 4-byte header (id, seq, status, delay) + 8 bytes data
+                int16_t qi = (int16_t)((uint16_t)bno_buf[pos+4] | ((uint16_t)bno_buf[pos+5] << 8));
+                int16_t qj = (int16_t)((uint16_t)bno_buf[pos+6] | ((uint16_t)bno_buf[pos+7] << 8));
+                int16_t qk = (int16_t)((uint16_t)bno_buf[pos+8] | ((uint16_t)bno_buf[pos+9] << 8));
+                int16_t qr = (int16_t)((uint16_t)bno_buf[pos+10] | ((uint16_t)bno_buf[pos+11] << 8));
+                imu_qx = qi / 16384.0f;  // Q14
+                imu_qy = qj / 16384.0f;
+                imu_qz = qk / 16384.0f;
+                imu_qw = qr / 16384.0f;
+                pos += 12;
+            }
+            else if (id == SH2_ACCELEROMETER && pos + 10 <= len) {
+                // 4-byte header + 6 bytes data
+                int16_t ax = (int16_t)((uint16_t)bno_buf[pos+4] | ((uint16_t)bno_buf[pos+5] << 8));
+                int16_t ay = (int16_t)((uint16_t)bno_buf[pos+6] | ((uint16_t)bno_buf[pos+7] << 8));
+                int16_t az = (int16_t)((uint16_t)bno_buf[pos+8] | ((uint16_t)bno_buf[pos+9] << 8));
+                imu_ax = ax / 256.0f;  // Q8, m/s²
+                imu_ay = ay / 256.0f;
+                imu_az = az / 256.0f;
+                pos += 10;
+            }
+            else if (id == SH2_GYROSCOPE_CALIBRATED && pos + 10 <= len) {
+                // 4-byte header + 6 bytes data
+                int16_t gx = (int16_t)((uint16_t)bno_buf[pos+4] | ((uint16_t)bno_buf[pos+5] << 8));
+                int16_t gy = (int16_t)((uint16_t)bno_buf[pos+6] | ((uint16_t)bno_buf[pos+7] << 8));
+                int16_t gz = (int16_t)((uint16_t)bno_buf[pos+8] | ((uint16_t)bno_buf[pos+9] << 8));
+                imu_gx = gx / 512.0f;  // Q9, rad/s
+                imu_gy = gy / 512.0f;
+                imu_gz = gz / 512.0f;
+                pos += 10;
+            }
+            else {
+                break;  // Unknown report or not enough data
+            }
         }
     }
 }
@@ -228,16 +359,16 @@ void readIMU() {
 void publishIMU() {
     if (!imu_available) return;
     // Format: i <qw> <qx> <qy> <qz> <ax> <ay> <az> <gx> <gy> <gz>
-    Serial.print("i ");
-    Serial.print(imu_qw, 4); Serial.print(" ");
-    Serial.print(imu_qx, 4); Serial.print(" ");
-    Serial.print(imu_qy, 4); Serial.print(" ");
-    Serial.print(imu_qz, 4); Serial.print(" ");
-    Serial.print(imu_ax, 4); Serial.print(" ");
-    Serial.print(imu_ay, 4); Serial.print(" ");
-    Serial.print(imu_az, 4); Serial.print(" ");
-    Serial.print(imu_gx, 4); Serial.print(" ");
-    Serial.print(imu_gy, 4); Serial.print(" ");
+    Serial.print(F("i "));
+    Serial.print(imu_qw, 4); Serial.print(' ');
+    Serial.print(imu_qx, 4); Serial.print(' ');
+    Serial.print(imu_qy, 4); Serial.print(' ');
+    Serial.print(imu_qz, 4); Serial.print(' ');
+    Serial.print(imu_ax, 4); Serial.print(' ');
+    Serial.print(imu_ay, 4); Serial.print(' ');
+    Serial.print(imu_az, 4); Serial.print(' ');
+    Serial.print(imu_gx, 4); Serial.print(' ');
+    Serial.print(imu_gy, 4); Serial.print(' ');
     Serial.println(imu_gz, 4);
 }
 
@@ -401,21 +532,21 @@ void updatePID() {
     // Debug output
     if (debug_countdown > 0) {
         debug_countdown--;
-        Serial.print("d L:");
+        Serial.print(F("d L:"));
         Serial.print(left_pid.target, 1);
-        Serial.print(",");
+        Serial.print(',');
         Serial.print(delta_left);
-        Serial.print(",");
+        Serial.print(',');
         Serial.print(left_pid.integral, 1);
-        Serial.print(",");
+        Serial.print(',');
         Serial.print(left_pid.output_pwm);
-        Serial.print(" R:");
+        Serial.print(F(" R:"));
         Serial.print(right_pid.target, 1);
-        Serial.print(",");
+        Serial.print(',');
         Serial.print(delta_right);
-        Serial.print(",");
+        Serial.print(',');
         Serial.print(right_pid.integral, 1);
-        Serial.print(",");
+        Serial.print(',');
         Serial.println(right_pid.output_pwm);
     }
 }
@@ -443,10 +574,10 @@ void processCommand(const char* cmd) {
         left_pid.prev_error = 0;
         right_pid.integral = 0;
         right_pid.prev_error = 0;
-        Serial.println("r ok");
+        Serial.println(F("r ok"));
     } else if (cmd[0] == 'd') {
         debug_countdown = 100;
-        Serial.println("d on");
+        Serial.println(F("d on"));
     }
 }
 
@@ -474,9 +605,9 @@ void publishEncoders() {
     r = right_ticks;
     interrupts();
 
-    Serial.print("e ");
+    Serial.print(F("e "));
     Serial.print(l);
-    Serial.print(" ");
+    Serial.print(' ');
     Serial.println(r);
 }
 
@@ -520,7 +651,7 @@ void setup() {
     Wire.begin();
     initIMU();
 
-    Serial.println("Leonardo motor+IMU controller ready (PID + BNO085)");
+    Serial.println(F("Leonardo motor+IMU controller ready (PID + BNO085)"));
 }
 
 void loop() {

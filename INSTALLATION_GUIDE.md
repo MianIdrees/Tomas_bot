@@ -180,13 +180,11 @@ sudo apt install -y arduino
 
 ---
 
-## 10. Install BNO085 Arduino Library
+## 10. ~~Install BNO085 Arduino Library~~ (No longer needed)
 
-1. Open Arduino IDE
-2. Go to **Tools → Manage Libraries...** (or **Sketch → Include Library → Manage Libraries...**)
-3. Search for **"Adafruit BNO08x"**
-4. Install **Adafruit BNO08x** — this also auto-installs `Adafruit BusIO` and `Adafruit Unified Sensor`
-5. Verify the **Wire** library is available (built-in, should already be present)
+> **The firmware now uses a minimal built-in SHTP I2C driver** instead of the Adafruit BNO08x library.
+> This was necessary because the Adafruit library's SH2 buffers exceed the ATmega32U4's 2.5KB SRAM.
+> The only Arduino library dependency is **Wire** (built-in). No external libraries need to be installed.
 
 ---
 
