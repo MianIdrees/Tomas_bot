@@ -53,6 +53,9 @@ sudo apt install -y ros-jazzy-navigation2 ros-jazzy-nav2-bringup
 # SLAM
 sudo apt install -y ros-jazzy-slam-toolbox
 
+# EKF sensor fusion (for IMU + wheel odometry fusion)
+sudo apt install -y ros-jazzy-robot-localization
+
 # ros2_control (for reference config)
 sudo apt install -y ros-jazzy-ros2-control ros-jazzy-ros2-controllers
 
@@ -90,7 +93,7 @@ cd ~/robot_ws/src
 # Clone the robot package
 git clone https://github.com/MianIdrees/Tomas_bot.git
 cd Tomas_bot
-git checkout feature/lattepanda-alpha-daniel
+git checkout feature/bno085-imu-ekf-integration
 cd ..
 
 # Clone sllidar_ros2 (RPLidar C1 driver -- not available via apt)
@@ -177,18 +180,32 @@ sudo apt install -y arduino
 
 ---
 
-## 10. Upload Arduino Firmware
+## 10. Install BNO085 Arduino Library
 
 1. Open Arduino IDE
-2. Open `~/robot_ws/src/Tomas_bot/firmware/motor_controller.ino`
+2. Go to **Tools → Manage Libraries...** (or **Sketch → Include Library → Manage Libraries...**)
+3. Search for **"Adafruit BNO08x"**
+4. Install **Adafruit BNO08x** — this also auto-installs `Adafruit BusIO` and `Adafruit Unified Sensor`
+5. Verify the **Wire** library is available (built-in, should already be present)
+
+---
+
+## 11. Upload Arduino Firmware
+
+1. Open Arduino IDE
+2. Open `~/robot_ws/src/Tomas_bot/firmware/motor_controller/motor_controller.ino`
 3. Select:
    - **Board:** Arduino Leonardo
    - **Port:** `/dev/ttyACM0` (or `/dev/arduino`)
 4. Click **Upload**
 5. Open Serial Monitor (115200 baud) — you should see:
    ```
-   Leonardo motor controller ready (PID + polling)
+   BNO085 found on I2C 0x4A
+   BNO085 reports enabled (RotVec+Accel+Gyro @20Hz)
+   Leonardo motor+IMU controller ready (PID + BNO085)
    ```
+
+> **If you see `! BNO085 not detected on I2C 0x4A`:** Check wiring — VIN→5V, GND→GND, SDA→D2, SCL→D3. See [IMU_GUIDE.md](IMU_GUIDE.md) for detailed troubleshooting.
 
 ---
 
@@ -207,12 +224,22 @@ sudo apt install -y arduino
 
 ### Encoder Wiring
 
-| Motor | Wire   | Arduino Pin | Function     |
-|-------|--------|-------------|--------------|
-| Left  | Green  | D3          | Encoder Ch A (interrupt) |
-| Left  | Yellow | D2          | Encoder Ch B (direction) |
-| Right | Yellow | A4          | Encoder Ch A (polled)    |
-| Right | Green  | A5          | Encoder Ch B (direction) |
+| Motor | Wire   | Arduino Pin | Function     | Notes |
+|-------|--------|-------------|--------------|-------|
+| Left  | Green  | **D1** | Encoder Ch A (INT3 interrupt) | **MOVED from D3** for IMU I²C |
+| Left  | Yellow | **D0** | Encoder Ch B (direction) | **MOVED from D2** for IMU I²C |
+| Right | Yellow | A4 | Encoder Ch A (polled) | Unchanged |
+| Right | Green  | A5 | Encoder Ch B (direction) | Unchanged |
+
+### BNO085 IMU → Arduino Leonardo (I²C)
+
+| BNO085 | Arduino | Function |
+|--------|---------|----------|
+| VIN    | 5V      | Power (3.3V regulator on breakout) |
+| GND    | GND     | Ground |
+| SDA    | D2      | I²C data (hardware SDA on Leonardo) |
+| SCL    | D3      | I²C clock (hardware SCL on Leonardo) |
+| INT    | D4      | Data-ready interrupt (optional) |
 
 ### Power
 

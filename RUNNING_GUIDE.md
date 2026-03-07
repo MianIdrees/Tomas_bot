@@ -10,12 +10,16 @@ Complete step-by-step guide for building, teleoperation, SLAM mapping, and auton
 
 - [x] Ubuntu 24.04 on LattePanda Alpha
 - [x] ROS2 Jazzy installed (`source /opt/ros/jazzy/setup.bash`)
-- [x] Arduino Leonardo firmware uploaded (`firmware/motor_controller.ino`)
+- [x] Arduino Leonardo firmware uploaded (`firmware/motor_controller/motor_controller.ino`)
+- [x] Adafruit BNO08x Arduino library installed
+- [x] BNO085 IMU wired: VIN→5V, GND→GND, SDA→D2, SCL→D3
+- [x] Left encoder moved: Green→D1, Yellow→D0 (freed D2/D3 for I²C)
 - [x] udev rules installed (`config/99-robot-devices.rules`)
 - [x] RPLidar C1 connected via USB → `/dev/rplidar`
 - [x] Arduino Leonardo connected → `/dev/arduino`
 - [x] 12V battery connected to L298N
 - [x] (Optional) PS3-style 2.4GHz wireless gamepad + USB dongle for joystick control
+- [x] IMU calibrated (`ros2 run Tomas_bot imu_calibration_node.py`) — see [IMU_GUIDE.md](IMU_GUIDE.md)
 
 ---
 
@@ -53,19 +57,22 @@ ros2 launch Tomas_bot bringup_hardware.launch.py
 
 **What starts:**
 | Node | Purpose |
-|------|---------||
-| `robot_state_publisher` | Publishes URDF and static TF tree |
+|------|--------|
+| `robot_state_publisher` | Publishes URDF and static TF tree (includes imu_link) |
 | `sllidar_node` | Publishes `/scan` from RPLidar C1 |
-| `diff_drive_node` | Arduino bridge: `/cmd_vel` → motors, encoders → `/odom` + TF `odom→base_link` |
+| `diff_drive_node` | Arduino bridge: `/cmd_vel` → motors, encoders → `/wheel/odom`, IMU → `/imu/data`, `/joint_states` |
+| `ekf_filter_node` | EKF sensor fusion: `/wheel/odom` + `/imu/data` → `/odom` + TF `odom→base_link` |
 
 **Verify:**
 ```bash
 # Terminal 2
 source ~/robot_ws/install/setup.bash
-ros2 topic list    # Should show: /scan, /odom, /cmd_vel, /joint_states, /tf, /tf_static
-ros2 node list     # Should show: /robot_state_publisher, /sllidar_node, /diff_drive_node
-ros2 topic hz /scan   # Should show ~10 Hz
-ros2 topic hz /odom   # Should show ~20 Hz
+ros2 topic list    # Should show: /scan, /odom, /wheel/odom, /imu/data, /cmd_vel, /joint_states, /tf, /tf_static
+ros2 node list     # Should show: /robot_state_publisher, /sllidar_node, /diff_drive_node, /ekf_filter_node
+ros2 topic hz /scan        # Should show ~10 Hz
+ros2 topic hz /wheel/odom  # Should show ~20 Hz (encoder odometry)
+ros2 topic hz /imu/data    # Should show ~20 Hz (BNO085 IMU)
+ros2 topic hz /odom        # Should show ~30 Hz (EKF fused output)
 ```
 
 ---
@@ -373,10 +380,19 @@ ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/maps/my_map.yaml
 # ──────────────────────────────────────────────────────────
 ros2 topic list
 ros2 topic hz /scan
-ros2 topic hz /odom
+ros2 topic hz /wheel/odom    # Encoder-only odometry (~20 Hz)
+ros2 topic hz /imu/data       # BNO085 IMU data (~20 Hz)
+ros2 topic hz /odom           # EKF fused output (~30 Hz)
 ros2 topic echo /odom --once
+ros2 topic echo /imu/data --once
 ros2 node list
 ros2 run tf2_tools view_frames
+
+# ──────────────────────────────────────────────────────────
+# IMU DIAGNOSTICS (standalone — no bringup needed)
+# ──────────────────────────────────────────────────────────
+ros2 run Tomas_bot imu_check_node.py
+ros2 run Tomas_bot imu_calibration_node.py
 ```
 
 ---
@@ -425,12 +441,39 @@ The default `ticks_per_rev=528` assumes 48:1 gear ratio × 11 PPR. To calibrate:
 
 ```
 map → odom → base_link → chassis → laser_frame
-                       ↘ left_wheel       ↘ caster_wheel
-                       ↘ right_wheel      ↘ lidar_riser
-                       ↘ base_footprint   ↘ left/right_motor
-                                          ↘ left/right_support
+                                  → imu_link (BNO085 IMU)
+                                  → lidar_riser
+                                  → caster_mount / caster_wheel
+                                  → left/right_motor
+                                  → left/right_support
+             ↘ base_footprint
+             ↘ left_wheel
+             ↘ right_wheel
 ```
 
 - `map → odom`: Published by SLAM Toolbox (during mapping) or AMCL (during navigation)
-- `odom → base_link`: Published by `diff_drive_node` (from encoder odometry)
+- `odom → base_link`: Published by **EKF** (`robot_localization`) — fused wheel encoders + BNO085 IMU
 - All other transforms: Published by `robot_state_publisher` (from URDF)
+
+---
+
+## IMU Calibration & Diagnostics
+
+See [IMU_GUIDE.md](IMU_GUIDE.md) for the complete BNO085 setup, calibration, and debugging guide.
+
+### Quick IMU Check
+
+```bash
+# Run the IMU health check (standalone — no bringup needed)
+ros2 run Tomas_bot imu_check_node.py
+
+# Run the full calibration procedure (10 interactive steps)
+ros2 run Tomas_bot imu_calibration_node.py
+```
+
+### Verify IMU in RViz
+
+After bringup, the `imu_link` should appear as a small blue rectangle on the chassis in RViz:
+```bash
+ros2 launch Tomas_bot bringup_hardware.launch.py use_rviz:=true
+```
