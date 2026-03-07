@@ -210,11 +210,82 @@ The script guides you through 10 steps:
 | 9 | Magnetometer: Rotate + tilt combined | 35s |
 | 10 | Verification: Flat, still, check readings | 12s |
 
+### Magnetometer Calibration — Detailed Instructions
+
+Steps 8 and 9 are the most important for heading accuracy. The magnetometer needs to sample Earth's magnetic field from **every direction** to build an internal correction model (called a "hard-iron / soft-iron" offset). Here's exactly what to do:
+
+#### Step 8: Figure-8 Rotations (45 seconds)
+
+1. Place the robot **flat on the floor** in normal driving position
+2. Move it to an **open area** — at least 1 meter away from:
+   - Motors, power supplies, or anything with magnets
+   - Metal tables, filing cabinets, steel-frame furniture
+   - Laptops, phones, speakers (they contain magnets)
+   - Walls with electrical wiring inside
+3. Perform the figure-8 pattern:
+   - **Rotate the robot 360° clockwise** (spin it in place on the floor) — take about 10 seconds per full rotation, moving slowly and smoothly
+   - **Then rotate 360° counter-clockwise** — same speed
+   - This is one "figure-8 loop" — **repeat 2-3 times**
+4. Keep the robot **flat on the floor** during this step — don't lift or tilt it
+5. Move at a **steady, slow pace** — jerky/fast movements give poor calibration data
+
+```
+Top-down view of figure-8 motion:
+
+    ┌──→──→──┐         ┌──←──←──┐
+    │  CW    ↓    then │  CCW   ↓
+    │  360°  │         │  360°  │
+    ↑        ↓         ↑        ↓
+    └──←──←──┘         └──→──→──┘
+       Loop 1             Loop 2        ... repeat
+```
+
+#### Step 9: Combined Tilt + Rotation (35 seconds)
+
+This step exposes the magnetometer to the **vertical component** of Earth's field (which the flat rotations in step 8 don't capture).
+
+1. **Rotate clockwise 360°** while simultaneously **rocking the robot ±15° forward and back** (nose up/down gently) — like it's driving over small bumps while spinning
+2. **Then rotate counter-clockwise 360°** with the same gentle rocking
+3. The goal is to trace out a **3D sphere** of orientations, not just a flat circle
+
+```
+Side view of tilt-while-rotating:
+
+     ↗  nose up ~15°
+    /
+   ●──── flat ────●
+    \
+     ↘  nose down ~15°
+
+   ... while the robot is slowly spinning in place
+```
+
+#### Why This Matters
+
+The BNO085's magnetometer measures Earth's magnetic field (~25-65 µT depending on location). Without calibration:
+- **Hard-iron errors**: Nearby permanent magnets (motors!) create constant offsets
+- **Soft-iron errors**: Metal near the sensor distorts the field unevenly
+
+The figure-8 + tilt motions let the BNO085's internal fusion algorithm compute and subtract these errors. After calibration, the heading (yaw) from the Game Rotation Vector will be more stable.
+
+> **Note:** Even though Tomas_bot uses `SH2_GAME_ROTATION_VECTOR` (which primarily relies on gyro + accel, not magnetometer), a well-calibrated magnetometer still helps the BNO085's internal sensor fusion algorithm produce a more drift-resistant orientation estimate.
+
+#### Signs of Good vs. Bad Magnetometer Calibration
+
+| Indicator | Good Calibration | Bad Calibration |
+|-----------|-----------------|-----------------|
+| Yaw drift when stationary | < 0.5°/min | > 2°/min |
+| Yaw after 360° rotation returns close to start | Within ±2° | Off by > 5° |
+| Heading consistent across reboots | Yes (within ±3°) | Jumps randomly |
+| Verification step quaternion norm | 0.999–1.001 | < 0.98 or > 1.02 |
+
 **Tips for good calibration:**
 - Do calibration **before** each mapping session if high accuracy is needed
 - The BNO085 performs **dynamic calibration** continuously — this script just helps it converge faster
 - Stay away from motors, metal desks, and magnetic sources during magnetometer steps
 - Move slowly and smoothly during rotation steps
+- Calibrate in the **same environment** where you'll operate — magnetic fields differ between rooms
+- If the robot has been moved to a very different location (different building/floor), recalibrate
 
 ### Verification After Calibration
 
