@@ -594,7 +594,7 @@ class TuningNode(Node):
         print('''
     WHAT THIS TEST DOES:
       Commands continuous rotation at 0.5 rad/s for 10 seconds.
-      The state machine's watchdog (rotation_max_duration = 6.0s)
+      The state machine's watchdog (rotation_max_duration = 3.5s)
       should stop the motors before the full 10 seconds.
 
     WHAT TO LOOK FOR:
@@ -652,12 +652,12 @@ class TuningNode(Node):
             'If you saw "WATCHDOG TRIGGERED" → protection works! ✓',
             'If robot kept spinning all 10 seconds → check diff_drive_node logs',
             '',
-            'Current setting: rotation_max_duration = 6.0 seconds',
+            'Current setting: rotation_max_duration = 3.5 seconds',
             '',
             'When to adjust:',
-            '  Robot needs slow U-turns → keep 6.0 or increase to 8.0',
-            '  Robot spins too much → decrease to 4.0 or 5.0',
-            '  At 0.5 rad/s: 6s allows ≈ 170° rotation (covers most turns)',
+            '  Robot needs slow U-turns → keep 3.5 or increase to 4.5',
+            '  Robot spins too much → decrease to 2.5 or 3.0',
+            '  At 0.5 rad/s: 3.5s allows ≈ 100° rotation (covers most turns)',
         ])
 
     # ====================================================================
@@ -668,7 +668,7 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 57)
-        rot_pwm = b.get('rotation_pwm', 65)
+        rot_pwm = b.get('rotation_pwm', 60)
         rot_soft = b.get('rotation_soft_start_steps', 5)
         lin_min = b.get('linear_min_speed', 0.10)
         arc_scale = b.get('arc_angular_scale', 0.90)
@@ -683,7 +683,7 @@ class TuningNode(Node):
     ║  rotation_soft_start_steps  = {rot_soft:<5}                         ║
     ║  linear_min_speed           = {lin_min:<5}                         ║
     ║  arc_angular_scale          = {arc_scale:<5.2f}                         ║
-    ║  rotation_max_duration      = 6.0   (keep unless spins out)    ║
+    ║  rotation_max_duration      = 3.5   (keep unless spins out)    ║
     ║  angular_deadband           = 0.03  (keep unless twitching)    ║
     ║  linear_deadband            = 0.005 (keep unless humming)      ║
     ║  linear_ramp_rate           = 35    (keep unless jerky)        ║
