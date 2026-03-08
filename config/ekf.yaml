@@ -19,7 +19,7 @@
 ekf_filter_node:
   ros__parameters:
     use_sim_time: false
-    frequency: 30.0
+    frequency: 20.0              # Match sensor rate (20Hz encoders+IMU) — prevents 'Failed to meet update rate'
     two_d_mode: true            # Ground robot — constrain to X, Y, yaw
     publish_tf: true            # Publish odom → base_link TF
     publish_acceleration: false

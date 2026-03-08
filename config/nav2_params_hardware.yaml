@@ -99,7 +99,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.15
-      movement_time_allowance: 15.0   # Generous for real robot — rotation needs time to start
+      movement_time_allowance: 25.0   # Very generous — large heading changes need time for rotation
 
     general_goal_checker:
       stateful: true

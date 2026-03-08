@@ -92,12 +92,13 @@ class DiffDriveNode(Node):
         # If robot over-shoots turns → decrease to 40 (never below)
 
         # --- NEW: Anti-spin protection ---
-        self.declare_parameter('max_continuous_rotation_deg', 270.0)
+        self.declare_parameter('max_continuous_rotation_deg', 450.0)
         # [TUNING] Maximum degrees of continuous rotation before clamping angular velocity.
-        # Prevents 360° runaway spins. Accumulates rotation from angular velocity feedback.
-        # Range: 90.0 to 540.0.
-        # If robot needs to do U-turns (180°), keep this >= 200.
-        # If robot spins out of control frequently → decrease to 180.
+        # Prevents runaway spins. Accumulates rotation from angular velocity feedback.
+        # Range: 180.0 to 540.0.
+        # At 450°: allows ~180° U-turn + overshoot corrections without triggering.
+        # If robot needs to do U-turns (180°), keep this >= 360.
+        # If robot spins out of control frequently → decrease to 360.
         # If robot can't complete needed turns → increase to 360.
 
         self.declare_parameter('anti_spin_angular_clamp', 0.3)
@@ -325,14 +326,15 @@ class DiffDriveNode(Node):
         right_pwm = max(-255, min(255, right_pwm))
 
         # --- Layer 5: PWM rescaling or min-PWM clamping ---
-        # Pure rotation SKIPS rescaling. The rescaling maps [1,255] → [min_pwm,255],
-        # which over-amplifies small rotation commands (e.g. raw PWM 11 → 49).
-        # Rotation needs much less torque than linear motion, and the Arduino PID
-        # naturally duty-cycles below its MIN_PWM for accurate low-speed rotation.
-        if is_pure_rotation:
-            left_pwm = self._apply_min_pwm(left_pwm, self.rotation_min_pwm)
-            right_pwm = self._apply_min_pwm(right_pwm, self.rotation_min_pwm)
-        elif self.use_pwm_rescaling:
+        # ALL commands (including pure rotation) use the same rescaling.
+        # Rescaling maps [1,255] → [min_pwm,255] proportionally:
+        #   w=0.086 → raw PWM 5  → rescaled 43  (gentle correction)
+        #   w=0.253 → raw PWM 15 → rescaled 52  (medium turn)
+        #   w=0.489 → raw PWM 29 → rescaled 64  (fast turn)
+        #   w=0.800 → raw PWM 47 → rescaled 79  (max rotation)
+        # This gives proportional rotation: Nav2 reduces w as heading error
+        # shrinks → motor slows down → precise stop, no overshoot.
+        if self.use_pwm_rescaling:
             left_pwm = self._rescale_pwm(left_pwm, self.min_pwm)
             right_pwm = self._rescale_pwm(right_pwm, self.min_pwm)
         else:
@@ -348,9 +350,9 @@ class DiffDriveNode(Node):
         self.last_right_pwm = right_pwm
         self.send_motor_command(left_pwm, right_pwm)
 
-        # Periodic PWM diagnostic logging (every ~2s at 20Hz)
+        # Periodic PWM diagnostic logging (every ~1s at 20Hz)
         self.pwm_log_counter += 1
-        if self.pwm_log_counter >= 40:
+        if self.pwm_log_counter >= 20:
             self.pwm_log_counter = 0
             if left_pwm != 0 or right_pwm != 0:
                 self.get_logger().info(
