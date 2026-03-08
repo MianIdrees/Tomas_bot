@@ -90,7 +90,6 @@ class TuningNode(Node):
         cum_yaw0 = self._cumulative_yaw
         t0 = time.time()
         last_print = -1.0
-        rate = self.create_rate(20)
 
         hdr = (f'    │ {"Time":>5s}  {"Cmd v":>6s} {"Cmd w":>6s} │ '
                f'{"Odom v":>6s} {"Odom w":>6s} │ {"Dist":>6s}  {"ΔYaw":>7s} │ Status')
@@ -121,7 +120,7 @@ class TuningNode(Node):
                       f'{self.odom_v:6.3f} {self.odom_w:6.3f} │ '
                       f'{dist:5.3f}m  {dyaw:+7.1f}° │ {st}')
                 last_print = elapsed
-            rate.sleep()
+            time.sleep(0.05)
 
         # Stop
         stop = Twist()
@@ -510,7 +509,6 @@ class TuningNode(Node):
         msg.angular.z = 0.5
         t0 = time.time()
         cum_yaw0 = self._cumulative_yaw
-        rate = self.create_rate(20)
         last_print = -1.0
 
         print(f'    ┌─────────────────────────────────────────────────────────────')
@@ -531,7 +529,7 @@ class TuningNode(Node):
                     st = '✓ rotating'
                 print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {total_deg:+7.1f}° │ {st}')
                 last_print = elapsed
-            rate.sleep()
+            time.sleep(0.05)
 
         stop = Twist()
         for _ in range(5):
@@ -739,10 +737,9 @@ class TuningNode(Node):
     │  STEP 1: BUILD THE PROJECT                                      │
     │                                                                  │
     │  If this is your first time, or you just switched branches:      │
-    │                                                                  │
-    │    cd ~/robot_ws                                                 │
-    │    colcon build --packages-select Tomas_bot                      │
-    │    source ~/robot_ws/install/setup.bash                          │
+ cd ~/robot_ws                                                 
+colcon build --packages-select Tomas_bot                      
+  source ~/robot_ws/install/setup.bash                          
     │                                                                  │
     │  If you changed motor_controller.ino (Arduino firmware):         │
     │    1. Open Arduino IDE                                           │
