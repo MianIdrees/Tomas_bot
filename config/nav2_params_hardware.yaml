@@ -110,12 +110,12 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.24        # [SPEED] Forward speed (m/s) — faster for responsive navigation
-      lookahead_dist: 0.4
-      min_lookahead_dist: 0.25          # Shorter lookahead = more responsive to path changes
-      max_lookahead_dist: 0.8
+      lookahead_dist: 0.5
+      min_lookahead_dist: 0.3           # Longer lookahead = smoother curves, less jerky corrections
+      max_lookahead_dist: 0.9
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.8   # [SPEED][TURNING] Faster in-place rotation for quicker turns
-      rotate_to_heading_min_angle: 0.4     # [TURNING] ~23° — trigger in-place turn earlier for cleaner heading
+      rotate_to_heading_angular_vel: 0.8   # [SPEED][TURNING] Speed for in-place rotation (only at sharp corners)
+      rotate_to_heading_min_angle: 1.2     # [TURNING] ~69° — only stop-and-rotate for sharp corners
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true   # Scale lookahead with speed for smoother curves
       min_approach_linear_velocity: 0.04   # [SPEED] Raised from 0.02 — must produce PWM above dead zone
@@ -127,7 +127,7 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.08  # Raised: ensures min speed stays well above motor dead zone
       allow_reversing: false
-      max_angular_accel: 0.8               # [SPEED][TURNING] Allow quicker angular acceleration for responsive turns
+      max_angular_accel: 1.2               # [SPEED][TURNING] Higher angular accel for smooth arcing turns
       max_robot_pose_search_dist: 10.0
 
 planner_server:
@@ -204,7 +204,7 @@ velocity_smoother:
     max_decel: [-0.8, 0.0, -1.2]      # [SPEED] Moderate deceleration
     odom_topic: "odom"
     odom_duration: 0.1
-    deadband_velocity: [0.005, 0.0, 0.02] # [SMOOTH] Tighter deadband to pass small commands through
+    deadband_velocity: [0.005, 0.0, 0.005] # [SMOOTH] Very low angular deadband — lets small turn commands through for smooth arcs
     velocity_timeout: 1.0
 
 local_costmap:
