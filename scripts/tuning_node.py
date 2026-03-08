@@ -376,31 +376,31 @@ class TuningNode(Node):
         # based on how far off the rotation is
         if avg_error_pct > 200:
             rec_boost = 0.5
-            rec_min_pwm = 10
+            rec_min_pwm = 15
             boost_note = 'Robot MASSIVELY over-rotates → halve boost, minimal floor'
         elif avg_error_pct > 100:
             rec_boost = 0.6
-            rec_min_pwm = 12
+            rec_min_pwm = 20
             boost_note = 'Robot over-rotates heavily → reduce boost significantly'
         elif avg_error_pct > 50:
             rec_boost = 0.7
-            rec_min_pwm = 15
+            rec_min_pwm = 25
             boost_note = 'Robot over-rotates → reduce boost'
         elif avg_error_pct > 20:
             rec_boost = 0.85
-            rec_min_pwm = 15
+            rec_min_pwm = 25
             boost_note = 'Robot slightly over-rotates → slight boost reduction'
         elif avg_error_pct < -50:
             rec_boost = min(current_boost + 0.3, 1.8)
-            rec_min_pwm = 30
+            rec_min_pwm = 40
             boost_note = 'Robot under-rotates significantly → INCREASE boost and floor'
         elif avg_error_pct < -20:
             rec_boost = min(current_boost + 0.15, 1.5)
-            rec_min_pwm = 25
+            rec_min_pwm = 35
             boost_note = 'Robot under-rotates → INCREASE boost slightly'
         else:
             rec_boost = current_boost
-            rec_min_pwm = 15
+            rec_min_pwm = 30
             boost_note = 'Current settings are working well — keep them'
 
         self.best['rotation_boost_factor'] = rec_boost
@@ -561,7 +561,7 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 40)
-        rot_min = b.get('rotation_min_pwm', 15)
+        rot_min = b.get('rotation_min_pwm', 30)
         boost = b.get('rotation_boost_factor', 1.0)
         approach = b.get('approach_min_linear_speed', 0.04)
 
@@ -599,9 +599,9 @@ class TuningNode(Node):
                                                                  ^^^
                  Change 1.0 → {boost:.2f}
 
-      Line ~81:  self.declare_parameter('rotation_min_pwm', 15)
+      Line ~81:  self.declare_parameter('rotation_min_pwm', 30)
                                                             ^^
-                 Change 15 → {rot_min}
+                 Change 30 → {rot_min}
 
       Line ~104: self.declare_parameter('approach_min_linear_speed', 0.04)
                                                                      ^^^^
@@ -794,7 +794,7 @@ colcon build --packages-select Tomas_bot
     │      Line ~65:  linear_deadband ............. default: 0.005     │
     │      Line ~66:  pwm_ramp_rate ............... default: 40        │
     │      Line ~74:  rotation_boost_factor ....... default: 1.0       │
-    │      Line ~81:  rotation_min_pwm ............ default: 15        │
+    │      Line ~81:  rotation_min_pwm ............ default: 30        │
     │      Line ~90:  max_continuous_rotation_deg . default: 270.0     │
     │      Line ~98:  anti_spin_angular_clamp ..... default: 0.3       │
     │      Line ~104: approach_min_linear_speed ... default: 0.04      │
