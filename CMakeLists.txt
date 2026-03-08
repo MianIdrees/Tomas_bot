@@ -44,6 +44,7 @@ install(
     scripts/imu_calibration_node.py
     scripts/imu_check_node.py
     scripts/tuning_node.py
+    scripts/rotation_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
