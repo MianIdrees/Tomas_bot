@@ -89,14 +89,14 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 60)
+        self.declare_parameter('rotation_pwm', 65)
         # [TUNING] Base PWM for in-place rotation. Target PWM after soft-start completes.
         # Range: 57 to 130. Set above min_pwm to give soft-start a ramp range.
         # Soft-start ramps from min_pwm (57) to this value, so robot responds immediately.
-        # At 60: ramp range is 57→60 (very gentle). Robot physically spins at ~0.9 rad/s
+        # At 65: ramp range is 57→65 (small, gentle). Robot physically spins at ~1.0 rad/s
         # regardless (min rotation speed is hardware-limited). Nav2 handles via closed-loop.
-        # If robot doesn't rotate at all → increase (try 65, 70).
-        # If rotation overshoots in Nav2 → decrease toward 58.
+        # If robot doesn't rotate at all → increase (try 70, 75).
+        # If rotation overshoots in Nav2 → decrease toward 60.
 
         self.declare_parameter('rotation_soft_start_steps', 5)
         # [TUNING] Number of control cycles (at 20Hz) to ramp from min_pwm to rotation_pwm.
@@ -106,12 +106,12 @@ class DiffDriveNode(Node):
         # If rotation jerks at start → increase to 8.
         # If rotation feels sluggish → decrease to 3.
 
-        self.declare_parameter('rotation_max_duration', 3.5)
+        self.declare_parameter('rotation_max_duration', 6.0)
         # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
-        # Range: 2.0 to 15.0 seconds. Tuned down from 6.0: robot spins at ~0.9 rad/s
-        # at minimum PWM, so 3.5s allows ~180° (covers U-turns). Prevents 360° spins.
-        # If robot can't complete U-turns → increase to 4.5.
-        # If robot spins out of control → decrease to 2.5.
+        # Range: 2.0 to 15.0 seconds. Tuned down from 8.0: robot spins at ~1.0 rad/s
+        # at minimum PWM, so 6s allows ~340° (covers U-turns with safety margin).
+        # If robot needs slow multi-turn → increase to 8.0.
+        # If robot spins out of control → decrease to 4.0.
 
         # --- LINEAR state parameters ---
         self.declare_parameter('linear_ramp_rate', 35)
@@ -157,20 +157,6 @@ class DiffDriveNode(Node):
         # At 6 and 20Hz: period = 300ms. If target is 50% of min_pwm → 3 cycles ON, 3 OFF.
         # Higher → smoother average but more visible pulsing. Lower → jerkier but faster response.
 
-        # --- Rotation braking ---
-        self.declare_parameter('rotation_brake_pwm', 57)
-        # [TUNING] PWM for active braking pulse when rotation stops.
-        # Applied in reverse direction for a few cycles to kill angular momentum.
-        # Range: 40 to 80. Use min_pwm (57) to guarantee motors engage.
-        # If robot still overshoots heading → increase (try 65, 70).
-        # If robot jerks backward on rotation stop → decrease (try 50, 45).
-
-        self.declare_parameter('rotation_brake_cycles', 2)
-        # [TUNING] Number of control cycles to apply brake pulse (at 20Hz = 100ms).
-        # Range: 1 to 5. Brief enough to stop momentum without reverse spinning.
-        # If robot still overshoots → increase to 3.
-        # If robot jerks on stop → decrease to 1.
-
         # --- Motor asymmetry compensation ---
         self.declare_parameter('motor_trim', 0.03)
         # [TUNING] Compensates for left/right motor speed asymmetry.
@@ -207,8 +193,6 @@ class DiffDriveNode(Node):
         self.duty_cycle_enabled = self.get_parameter('duty_cycle_enabled').value
         self.duty_cycle_period = self.get_parameter('duty_cycle_period').value
         self.motor_trim = self.get_parameter('motor_trim').value
-        self.rotation_brake_pwm = self.get_parameter('rotation_brake_pwm').value
-        self.rotation_brake_cycles = self.get_parameter('rotation_brake_cycles').value
 
         # Derived constants
         self.meters_per_tick = (2.0 * math.pi * self.wheel_rad) / self.ticks_per_rev
@@ -219,8 +203,6 @@ class DiffDriveNode(Node):
         self.rotation_start_time = None
         self.rotation_step_count = 0  # For soft-start ramping
         self.duty_cycle_counter = 0   # For low-speed duty cycling
-        self.braking_cycles_remaining = 0  # Active brake countdown
-        self.last_rotation_sign = 1       # +1=CCW, -1=CW (for brake direction)
 
         # ========================== ODOMETRY STATE ==========================
         self.x = 0.0
@@ -279,7 +261,6 @@ class DiffDriveNode(Node):
         self.get_logger().info(
             f'State machine: soft_start={self.rotation_soft_start_steps} steps, '
             f'rot_watchdog={self.rotation_max_duration}s, '
-            f'brake={self.rotation_brake_cycles} cycles @ PWM {self.rotation_brake_pwm}, '
             f'duty_cycle={"ON" if self.duty_cycle_enabled else "OFF"}'
         )
 
@@ -325,14 +306,9 @@ class DiffDriveNode(Node):
         if new_state == MotionState.ROTATING:
             self.rotation_start_time = time.time()
             self.rotation_step_count = 0
-            self.braking_cycles_remaining = 0  # Cancel any pending brake
         elif new_state == MotionState.IDLE:
             self.rotation_start_time = None
             self.rotation_step_count = 0
-
-        # Active braking: when leaving ROTATING, apply reverse PWM to kill momentum
-        if old_state == MotionState.ROTATING and new_state != MotionState.ROTATING:
-            self.braking_cycles_remaining = self.rotation_brake_cycles
 
         if old_state != new_state:
             self.get_logger().debug(f'State: {old_state.name} → {new_state.name}')
@@ -415,19 +391,7 @@ class DiffDriveNode(Node):
         elif self.motion_state == MotionState.ARC:
             left_pwm, right_pwm = self._compute_arc_pwm(v, w)
 
-        # --- Layer 4: Active braking override ---
-        if self.braking_cycles_remaining > 0:
-            brake_pwm = self.rotation_brake_pwm
-            # Reverse of last rotation direction to counter momentum
-            left_pwm = self.last_rotation_sign * brake_pwm
-            right_pwm = -self.last_rotation_sign * brake_pwm
-            self.braking_cycles_remaining -= 1
-            self.get_logger().info(
-                f'[BRAKE] cycle {self.rotation_brake_cycles - self.braking_cycles_remaining}'
-                f'/{self.rotation_brake_cycles} L={left_pwm} R={right_pwm}'
-            )
-
-        # --- Layer 5: Clamp ---
+        # --- Layer 4: Clamp ---
         left_pwm = max(-255, min(255, left_pwm))
         right_pwm = max(-255, min(255, right_pwm))
 
@@ -469,7 +433,6 @@ class DiffDriveNode(Node):
 
         # Direction: positive w = CCW = left backward, right forward
         w_sign = 1 if w > 0 else -1
-        self.last_rotation_sign = w_sign  # Track for active braking
         left_pwm = -w_sign * target_pwm
         right_pwm = w_sign * target_pwm
 
