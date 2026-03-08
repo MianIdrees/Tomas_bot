@@ -824,7 +824,115 @@ class TuningNode(Node):
         print('╚══════════════════════════════════════════════════════════════════════╝')
         print('''
     ═══════════════════════════════════════════════════════════════════
-    HOW THIS SCRIPT WORKS (read this first!)
+    COMPLETE GUIDE — BUILD, RUN, TUNE, APPLY
+    ═══════════════════════════════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  STEP 1: BUILD THE PROJECT                                      │
+    │                                                                  │
+    │  If this is your first time, or you just switched branches:      │
+    │                                                                  │
+    │    cd ~/robot_ws                                                 │
+    │    colcon build --packages-select Tomas_bot                      │
+    │    source ~/robot_ws/install/setup.bash                          │
+    │                                                                  │
+    │  If you changed motor_controller.ino (Arduino firmware):         │
+    │    1. Open Arduino IDE                                           │
+    │    2. Open firmware/motor_controller/motor_controller.ino        │
+    │    3. Select Board → Arduino Leonardo                            │
+    │    4. Select the correct USB port                                │
+    │    5. Click Upload                                               │
+    │    ⚠ You MUST upload the Arduino sketch if you switch branches!  │
+    │      final-2 uses MIN_PWM=45 (different from final-1's 40)      │
+    └──────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  STEP 2: RUN THE TUNING SCRIPT                                  │
+    │                                                                  │
+    │  Open TWO terminals:                                             │
+    │                                                                  │
+    │  Terminal 1 — Start the robot:                                   │
+    │    ros2 launch Tomas_bot bringup_hardware.launch.py              │
+    │    (wait until you see "diff_drive_node started" in the logs)    │
+    │                                                                  │
+    │  Terminal 2 — Run tuning:                                        │
+    │    ros2 run Tomas_bot tuning_node.py                             │
+    │                                                                  │
+    │  Place robot on the FLOOR with space around it (1m+ clearance).  │
+    │  Select "a" to run ALL chapters, or pick individual chapters.    │
+    │  Press ENTER before each test — the robot will move on its own.  │
+    └──────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  STEP 3: WHAT THE SCRIPT TESTS & WHAT PARAMETERS YOU GET        │
+    │                                                                  │
+    │  Ch 1: Dead Zone    → finds min_pwm                              │
+    │  Ch 2: Rotation     → finds rotation_pwm,                        │
+    │                        rotation_soft_start_steps                  │
+    │  Ch 3: Linear       → finds linear_min_speed                     │
+    │  Ch 4: Arcs/Curves  → finds arc_angular_scale                    │
+    │  Ch 5: Duty Cycling → validates duty_cycle_period                 │
+    │  Ch 6: Watchdog     → validates rotation_max_duration             │
+    │  Ch 7: SUMMARY      → shows ALL best values + exact edit spots   │
+    │                                                                  │
+    │  The script picks the best values automatically.                 │
+    │  You do NOT need to calculate anything yourself.                  │
+    └──────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  STEP 4: AFTER TUNING — WHERE TO EDIT (3 files, 2 mandatory)    │
+    │                                                                  │
+    │  FILE 1 (MANDATORY): scripts/diff_drive_node.py                  │
+    │    Lines to edit (change the number after the comma):            │
+    │      Line ~72:  min_pwm .................. default: 45           │
+    │      Line ~80:  angular_deadband ......... default: 0.03         │
+    │      Line ~86:  linear_deadband .......... default: 0.005        │
+    │      Line ~92:  rotation_pwm ............. default: 70           │
+    │      Line ~101: rotation_soft_start_steps  default: 5            │
+    │      Line ~109: rotation_max_duration .... default: 8.0          │
+    │      Line ~117: linear_ramp_rate ......... default: 35           │
+    │      Line ~125: linear_min_speed ......... default: 0.04         │
+    │      Line ~133: arc_ramp_rate ............ default: 30           │
+    │      Line ~140: arc_angular_scale ........ default: 0.85         │
+    │      Line ~149: duty_cycle_enabled ....... default: True         │
+    │      Line ~155: duty_cycle_period ........ default: 4            │
+    │                                                                  │
+    │  FILE 2 (MANDATORY): firmware/motor_controller/motor_controller  │
+    │    Line ~215: #define MIN_PWM  45                                 │
+    │    ⚠ MUST match min_pwm from File 1!                             │
+    │    ⚠ After changing → re-upload to Arduino!                      │
+    │                                                                  │
+    │  FILE 3 (OPTIONAL): config/nav2_params_hardware.yaml             │
+    │    rotate_to_heading_angular_vel: 0.5                            │
+    │    min_approach_linear_velocity:  0.05                            │
+    │    (only change if Nav2 navigation has problems)                 │
+    └──────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  STEP 5: APPLY CHANGES                                          │
+    │                                                                  │
+    │  After editing the files:                                        │
+    │                                                                  │
+    │  1. If you changed motor_controller.ino:                         │
+    │     → Open Arduino IDE → Upload to Arduino Leonardo              │
+    │                                                                  │
+    │  2. Rebuild:                                                     │
+    │     cd ~/robot_ws && colcon build --packages-select Tomas_bot    │
+    │                                                                  │
+    │  3. Source:                                                       │
+    │     source ~/robot_ws/install/setup.bash                         │
+    │                                                                  │
+    │  4. Test:                                                         │
+    │     ros2 launch Tomas_bot bringup_hardware.launch.py             │
+    │     ros2 launch Tomas_bot navigation_hardware.launch.py          │
+    │       map:=<your_map_yaml>                                       │
+    │     Set a 2D Goal in RViz2 and see if behavior improved.         │
+    │                                                                  │
+    │  5. Still not perfect? Run this tuning script again!              │
+    └──────────────────────────────────────────────────────────────────┘
+
+    ═══════════════════════════════════════════════════════════════════
+    HOW THIS SCRIPT WORKS
     ═══════════════════════════════════════════════════════════════════
 
     SETUP:
