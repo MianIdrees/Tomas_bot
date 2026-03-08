@@ -33,6 +33,44 @@ cd ~/robot_ws
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
 source install/setup.bash
+# ──────────────────────────────────────────────────────────
+# BRINGUP (Terminal 1 — always run first, keep running)
+# No RViz by default; SLAM/Nav2 launch their own RViz
+# Add use_rviz:=true to open RViz from bringup
+# ──────────────────────────────────────────────────────────
+ros2 launch Tomas_bot bringup_hardware.launch.py
+
+# ──────────────────────────────────────────────────────────
+# TELEOP (Terminal 2 — keyboard driving)
+# Press z/x to decrease/increase linear speed
+# Press e/c to decrease/increase angular speed
+# For mapping use: ~0.10–0.15 m/s linear, ~0.3–0.5 rad/s angular
+# ──────────────────────────────────────────────────────────
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+# ──────────────────────────────────────────────────────────
+# JOYSTICK TELEOP (Terminal 2 — PS3 gamepad driving)
+# Hold L1 to enable, L1+R1 for turbo, Start for E-stop
+# Left Stick Y = forward/back, Right Stick X = turn
+# ──────────────────────────────────────────────────────────
+ros2 launch Tomas_bot joystick_teleop.launch.py
+
+# ──────────────────────────────────────────────────────────
+# SLAM MAPPING + RVIZ2 (Terminal 3 — build a map while driving)
+# RViz2 opens automatically; add use_rviz:=false to disable
+# ──────────────────────────────────────────────────────────
+ros2 launch Tomas_bot slam_hardware.launch.py
+
+# ──────────────────────────────────────────────────────────
+# SAVE MAP (Terminal 4 — after mapping is complete)
+# ──────────────────────────────────────────────────────────
+ros2 run nav2_map_server map_saver_cli -f ~/robot_ws/my_map1
+
+# ──────────────────────────────────────────────────────────
+# AUTONOMOUS NAVIGATION + RVIZ2 (Terminal 3 — after stopping SLAM)
+# RViz2 opens automatically; add use_rviz:=false to disable
+# ──────────────────────────────────────────────────────────
+ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/robot_ws/my_map1.yaml
 ```
 
 > **Tip:** Add to `~/.bashrc` so every new terminal is ready:
