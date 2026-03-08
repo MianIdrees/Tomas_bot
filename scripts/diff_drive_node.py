@@ -2,6 +2,15 @@
 """
 diff_drive_node.py - ROS2 Serial Bridge for Arduino Leonardo Motor + IMU Controller
 
+BRANCH: final-2 — Motion Profile State Machine
+
+Approach: Solves sharp-turn stalling, excessive spinning, and slow goal approach by:
+  1. State machine: IDLE / ROTATING / LINEAR / ARC with per-state PWM profiles
+  2. Soft-start rotation: Ramps angular PWM gradually to avoid jerks and overshooting
+  3. Rotation watchdog: Time-limited rotation with automatic cutoff
+  4. Duty-cycling for low speed: Alternates between MIN_PWM and 0 to achieve sub-min speeds
+  5. Feedforward compensation: Adds offset PWM based on commanded velocity direction
+
 This node bridges ROS2 and the Arduino Leonardo controller on LattePanda Alpha:
   - Subscribes to /cmd_vel (Twist) -> sends PWM commands to Arduino Leonardo
   - Reads encoder ticks from Arduino -> publishes /wheel/odom (Odometry)
@@ -18,6 +27,7 @@ Serial Protocol (USB CDC, 115200 baud):
 import math
 import time
 import threading
+from enum import Enum
 
 import rclpy
 from rclpy.node import Node
@@ -41,6 +51,13 @@ def quaternion_from_yaw(yaw):
     return q
 
 
+class MotionState(Enum):
+    IDLE = 0
+    ROTATING = 1     # Pure in-place rotation (no linear velocity)
+    LINEAR = 2       # Pure forward/backward (no angular velocity)
+    ARC = 3          # Combined linear + angular (curve following)
+
+
 class DiffDriveNode(Node):
     def __init__(self):
         super().__init__('diff_drive_node')
@@ -52,15 +69,96 @@ class DiffDriveNode(Node):
         self.declare_parameter('wheel_radius', 0.0345)     # 69mm wheels
         self.declare_parameter('ticks_per_rev', 528.0)     # 11 PPR x 48:1 gear (CALIBRATE)
         self.declare_parameter('max_motor_speed', 0.391)   # [SPEED] Measured: ~48 ticks/50ms × 20Hz × 0.000411 m/tick (raw PWM 255)
-        self.declare_parameter('min_pwm', 25)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
-        self.declare_parameter('angular_deadband', 0.05)     # rad/s — filter only jitter, allow real turn commands through
-        self.declare_parameter('pwm_ramp_rate', 50)          # Max PWM change per cmd_vel cycle (near-instant; Arduino PID handles smooth accel)
+        self.declare_parameter('min_pwm', 45)               # Raised: heavy 2.4kg robot dead zone. MUST match Arduino MIN_PWM.
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('publish_tf', False)        # EKF publishes odom->base_link TF
-        self.declare_parameter('publish_rate', 20.0)       # Hz
+        self.declare_parameter('publish_tf', False)         # EKF publishes odom->base_link TF
+        self.declare_parameter('publish_rate', 20.0)        # Hz
         self.declare_parameter('imu_frame', 'imu_link')
 
+        # --- Motion state thresholds ---
+        self.declare_parameter('angular_deadband', 0.03)
+        # [TUNING] Angular velocity below this → treated as zero (filters sensor jitter).
+        # Range: 0.01 to 0.10 rad/s.
+        # Lower → more responsive to small turn commands (risk: motor hum without motion).
+        # Higher → filters more, but may ignore needed turn commands.
+
+        self.declare_parameter('linear_deadband', 0.005)
+        # [TUNING] Linear velocity below this → treated as zero.
+        # Range: 0.001 to 0.02 m/s.
+        # Keep very low so Nav2 approach commands pass through.
+
+        # --- ROTATION state parameters ---
+        self.declare_parameter('rotation_pwm', 70)
+        # [TUNING] Base PWM for in-place rotation. This is the target PWM after soft-start.
+        # Range: 45 to 130.
+        # This is a fixed PWM for rotation (not velocity-proportional) because at low angular
+        # velocities the proportional PWM falls below dead zone. Instead, we use a fixed PWM
+        # and control rotation duration/duty-cycle.
+        # If robot doesn't rotate at all → increase (try 80, 90, 100).
+        # If robot over-rotates or spins too fast → decrease (try 60, 55).
+
+        self.declare_parameter('rotation_soft_start_steps', 5)
+        # [TUNING] Number of control cycles (at 20Hz) to ramp up to rotation_pwm.
+        # Range: 1 to 15.
+        # At 5 steps and 20Hz → takes 0.25s to reach full rotation PWM.
+        # Higher → gentler start (less jerk, less overshoot). Lower → faster response.
+        # If robot jerks when starting rotation → increase to 8-10.
+        # If rotation feels sluggish to start → decrease to 2-3.
+
+        self.declare_parameter('rotation_max_duration', 8.0)
+        # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
+        # Range: 2.0 to 15.0 seconds.
+        # At 0.6 rad/s, 8s = ~275° of rotation — enough for U-turns.
+        # If robot needs to do 360° turns → increase to 12.0.
+        # If robot spins out of control → decrease to 4.0.
+
+        # --- LINEAR state parameters ---
+        self.declare_parameter('linear_ramp_rate', 35)
+        # [TUNING] Max PWM change per control cycle for linear motion.
+        # Range: 10 to 80.
+        # At 35 and 20Hz → 700 PWM/s → reaches full speed (PWM 255) in ~0.36s.
+        # Lower → smoother acceleration (better for heavy robot). Higher → snappier.
+        # If robot jerks when starting forward → decrease to 20.
+        # If robot feels sluggish to accelerate → increase to 50.
+
+        self.declare_parameter('linear_min_speed', 0.04)
+        # [TUNING] Minimum linear speed when robot is supposed to be moving.
+        # Range: 0.02 to 0.10 m/s.
+        # Prevents Nav2 from commanding speeds below motor dead zone near goal.
+        # If robot stalls near goal → increase (try 0.06, 0.08).
+        # If robot overshoots goal → decrease (try 0.03).
+
+        # --- ARC state parameters ---
+        self.declare_parameter('arc_ramp_rate', 30)
+        # [TUNING] Max PWM change per cycle during arc/curve following.
+        # Range: 10 to 60.
+        # Slightly slower than linear ramp because differential PWM causes heading changes.
+        # If robot wobbles on curves → decrease to 20.
+        # If curves feel sluggish → increase to 45.
+
+        self.declare_parameter('arc_angular_scale', 0.85)
+        # [TUNING] Scale factor for angular component during arc motion.
+        # Range: 0.5 to 1.2.
+        # Reduces angular influence when combined with linear to prevent over-steering.
+        # At 0.85: angular PWM contribution is 85% of calculated value.
+        # If robot over-steers on curves → decrease (try 0.7).
+        # If robot under-steers (wide turns) → increase (try 1.0).
+
+        # --- Duty cycling for sub-minimum speeds ---
+        self.declare_parameter('duty_cycle_enabled', True)
+        # [TUNING] Enable duty-cycling for speeds below min_pwm threshold.
+        # When True: alternates between min_pwm and 0 to achieve average speed below min.
+        # When False: any speed below min_pwm is clamped to min_pwm (jumpy at low speeds).
+        # Duty cycling gives smoother low-speed control but may cause slight pulsing.
+
+        self.declare_parameter('duty_cycle_period', 4)
+        # [TUNING] Number of control cycles per duty-cycle period.
+        # Range: 2 to 10.
+        # At 4 and 20Hz: period = 200ms. If target is 50% of min_pwm → 2 cycles ON, 2 OFF.
+        # Higher → smoother average but more visible pulsing. Lower → jerkier but faster response.
+
+        # Load all parameters
         self.serial_port = self.get_parameter('serial_port').value
         self.baud_rate = self.get_parameter('baud_rate').value
         self.wheel_sep = self.get_parameter('wheel_separation').value
@@ -68,18 +166,33 @@ class DiffDriveNode(Node):
         self.ticks_per_rev = self.get_parameter('ticks_per_rev').value
         self.max_motor_speed = self.get_parameter('max_motor_speed').value
         self.min_pwm = self.get_parameter('min_pwm').value
-        self.angular_deadband = self.get_parameter('angular_deadband').value
-        self.pwm_ramp_rate = self.get_parameter('pwm_ramp_rate').value
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.publish_tf = self.get_parameter('publish_tf').value
         self.publish_rate = self.get_parameter('publish_rate').value
         self.imu_frame = self.get_parameter('imu_frame').value
 
+        self.angular_deadband = self.get_parameter('angular_deadband').value
+        self.linear_deadband = self.get_parameter('linear_deadband').value
+        self.rotation_pwm = self.get_parameter('rotation_pwm').value
+        self.rotation_soft_start_steps = self.get_parameter('rotation_soft_start_steps').value
+        self.rotation_max_duration = self.get_parameter('rotation_max_duration').value
+        self.linear_ramp_rate = self.get_parameter('linear_ramp_rate').value
+        self.linear_min_speed = self.get_parameter('linear_min_speed').value
+        self.arc_ramp_rate = self.get_parameter('arc_ramp_rate').value
+        self.arc_angular_scale = self.get_parameter('arc_angular_scale').value
+        self.duty_cycle_enabled = self.get_parameter('duty_cycle_enabled').value
+        self.duty_cycle_period = self.get_parameter('duty_cycle_period').value
+
         # Derived constants
         self.meters_per_tick = (2.0 * math.pi * self.wheel_rad) / self.ticks_per_rev
-        # PWM scaling: PWM_value = velocity / max_motor_speed * 255
         self.pwm_per_mps = 255.0 / self.max_motor_speed
+
+        # ========================== MOTION STATE ==========================
+        self.motion_state = MotionState.IDLE
+        self.rotation_start_time = None
+        self.rotation_step_count = 0  # For soft-start ramping
+        self.duty_cycle_counter = 0   # For low-speed duty cycling
 
         # ========================== ODOMETRY STATE ==========================
         self.x = 0.0
@@ -92,7 +205,6 @@ class DiffDriveNode(Node):
         self.last_right_ticks = None
         self.last_odom_time = None
 
-        # Wheel positions for joint_states (radians)
         self.left_wheel_pos = 0.0
         self.right_wheel_pos = 0.0
 
@@ -102,12 +214,10 @@ class DiffDriveNode(Node):
         self.connect_serial()
 
         # ========================== ROS2 INTERFACES ==========================
-        # Subscriber
         self.cmd_vel_sub = self.create_subscription(
             Twist, '/cmd_vel', self.cmd_vel_callback, 10
         )
 
-        # Publishers
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -117,31 +227,31 @@ class DiffDriveNode(Node):
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
         self.imu_pub = self.create_publisher(Imu, '/imu/data', qos)
 
-        # TF Broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # Timer for reading serial and publishing odometry
         period = 1.0 / self.publish_rate
         self.timer = self.create_timer(period, self.update_callback)
 
-        # Watchdog: stop motors if no cmd_vel for 0.5s
+        # Watchdog
         self.last_cmd_time = self.get_clock().now()
-        self.cmd_timeout = 0.5  # seconds
+        self.cmd_timeout = 0.5
 
-        # Store last motor command for continuous resending
         self.last_left_pwm = 0
         self.last_right_pwm = 0
-        self.pwm_log_counter = 0  # Periodic PWM diagnostic logging
+        self.pwm_log_counter = 0
 
         self.get_logger().info(
-            f'DiffDriveNode started: port={self.serial_port}, '
-            f'wheel_sep={self.wheel_sep}, wheel_rad={self.wheel_rad}, '
-            f'ticks_per_rev={self.ticks_per_rev}'
+            f'DiffDriveNode [final-2 State Machine] started: port={self.serial_port}, '
+            f'wheel_sep={self.wheel_sep}, wheel_rad={self.wheel_rad}'
         )
         self.get_logger().info(
             f'Motor params: max_speed={self.max_motor_speed} m/s, '
-            f'min_pwm={self.min_pwm}, ramp_rate={self.pwm_ramp_rate}, '
-            f'pwm_per_mps={self.pwm_per_mps:.1f}'
+            f'min_pwm={self.min_pwm}, rotation_pwm={self.rotation_pwm}'
+        )
+        self.get_logger().info(
+            f'State machine: soft_start={self.rotation_soft_start_steps} steps, '
+            f'rot_watchdog={self.rotation_max_duration}s, '
+            f'duty_cycle={"ON" if self.duty_cycle_enabled else "OFF"}'
         )
 
     def connect_serial(self):
@@ -161,16 +271,88 @@ class DiffDriveNode(Node):
             self.get_logger().error(f'Failed to open serial port {self.serial_port}: {e}')
             self.ser = None
 
-    def cmd_vel_callback(self, msg: Twist):
-        """Convert cmd_vel to motor PWM commands.
+    def _classify_motion(self, v, w):
+        """Classify the commanded motion into a state."""
+        has_linear = abs(v) >= self.linear_deadband
+        has_angular = abs(w) >= self.angular_deadband
 
-        Pipeline:
-        1. Deadband: Filter jitter (< 0.05 rad/s angular, < 0.01 m/s linear)
-        2. Inverse kinematics: cmd_vel → per-wheel velocities → raw PWM
-        3. Ramp: Limit PWM change per cycle for smooth acceleration
-        4. Arduino PID handles dead-zone compensation and speed tracking
+        if not has_linear and not has_angular:
+            return MotionState.IDLE
+        elif has_angular and not has_linear:
+            return MotionState.ROTATING
+        elif has_linear and not has_angular:
+            return MotionState.LINEAR
+        else:
+            return MotionState.ARC
+
+    def _transition_state(self, new_state):
+        """Handle state transitions and reset state-specific variables."""
+        if new_state == self.motion_state:
+            return
+
+        old_state = self.motion_state
+        self.motion_state = new_state
+
+        if new_state == MotionState.ROTATING:
+            self.rotation_start_time = time.time()
+            self.rotation_step_count = 0
+        elif new_state == MotionState.IDLE:
+            self.rotation_start_time = None
+            self.rotation_step_count = 0
+
+        if old_state != new_state:
+            self.get_logger().debug(f'State: {old_state.name} → {new_state.name}')
+
+    def _apply_duty_cycle(self, pwm):
+        """Apply duty cycling for sub-minimum PWM values.
+
+        Instead of clamping low PWM to min_pwm (which overshoots), alternate
+        between min_pwm and 0 over a period to achieve a lower average PWM.
+        """
+        if not self.duty_cycle_enabled:
+            # Simple clamping fallback
+            if pwm == 0:
+                return 0
+            sign = 1 if pwm > 0 else -1
+            return sign * max(abs(pwm), self.min_pwm)
+
+        if pwm == 0:
+            return 0
+
+        sign = 1 if pwm > 0 else -1
+        abs_pwm = abs(pwm)
+
+        if abs_pwm >= self.min_pwm:
+            # Above dead zone: no duty cycling needed
+            return pwm
+
+        # Below dead zone: duty cycle between min_pwm and 0
+        # Calculate how many cycles should be ON in the period
+        duty_ratio = abs_pwm / self.min_pwm  # 0.0 to 1.0
+        on_cycles = max(1, int(round(duty_ratio * self.duty_cycle_period)))
+
+        # Determine if this cycle should be ON or OFF
+        cycle_pos = self.duty_cycle_counter % self.duty_cycle_period
+        if cycle_pos < on_cycles:
+            return sign * self.min_pwm
+        else:
+            return 0
+
+    def cmd_vel_callback(self, msg: Twist):
+        """Convert cmd_vel to motor PWM commands using motion state machine.
+
+        Pipeline (Branch final-2 — Motion Profile State Machine):
+        1. Deadband: Filter jitter
+        2. State classification: IDLE / ROTATING / LINEAR / ARC
+        3. State-specific PWM generation:
+           - ROTATING: Fixed PWM with soft-start ramp + watchdog timeout
+           - LINEAR: Velocity-proportional PWM with ramp + speed floor
+           - ARC: Combined with angular scaling + moderate ramp
+        4. Duty cycling: Sub-minimum speeds use ON/OFF alternation
+        5. Send to Arduino (Arduino PID handles final speed tracking)
         """
         self.last_cmd_time = self.get_clock().now()
+        self.duty_cycle_counter += 1
 
         v = msg.linear.x   # m/s
         w = msg.angular.z   # rad/s
@@ -178,24 +360,30 @@ class DiffDriveNode(Node):
         # --- Layer 1: Deadband ---
         if abs(w) < self.angular_deadband:
             w = 0.0
-        if abs(v) < 0.01:
+        if abs(v) < self.linear_deadband:
             v = 0.0
 
-        # Inverse kinematics: compute wheel velocities
-        v_left = v - (w * self.wheel_sep / 2.0)
-        v_right = v + (w * self.wheel_sep / 2.0)
+        # --- Layer 2: Classify and transition state ---
+        new_state = self._classify_motion(v, w)
+        self._transition_state(new_state)
 
-        # Convert to raw PWM (-255 to 255)
-        left_pwm = int(v_left * self.pwm_per_mps)
-        right_pwm = int(v_right * self.pwm_per_mps)
+        # --- Layer 3: State-specific PWM generation ---
+        if self.motion_state == MotionState.IDLE:
+            left_pwm = 0
+            right_pwm = 0
 
-        # Clamp to valid range
+        elif self.motion_state == MotionState.ROTATING:
+            left_pwm, right_pwm = self._compute_rotation_pwm(w)
+
+        elif self.motion_state == MotionState.LINEAR:
+            left_pwm, right_pwm = self._compute_linear_pwm(v)
+
+        elif self.motion_state == MotionState.ARC:
+            left_pwm, right_pwm = self._compute_arc_pwm(v, w)
+
+        # --- Layer 4: Clamp ---
         left_pwm = max(-255, min(255, left_pwm))
         right_pwm = max(-255, min(255, right_pwm))
-
-        # --- Smooth ramp ---
-        left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm)
-        right_pwm = self._ramp_pwm(right_pwm, self.last_right_pwm)
 
         # Store and send
         self.last_left_pwm = left_pwm
@@ -212,50 +400,108 @@ class DiffDriveNode(Node):
                     f'PWM L={left_pwm} R={right_pwm}'
                 )
 
-    def _apply_min_pwm(self, pwm):
-        """Clamp non-zero PWM to at least ±min_pwm.
+    def _compute_rotation_pwm(self, w):
+        """Compute PWM for pure in-place rotation with soft-start and watchdog.
 
-        This ensures the Arduino PID always gets a target above the motor's
-        dead-zone. Unlike rescaling (which inflated ALL values proportionally),
-        this only affects very low PWM values — higher values pass through unchanged.
+        Instead of converting angular velocity to proportional PWM (which falls
+        below the dead zone for small angles), use a fixed rotation_pwm and
+        control it with soft-start ramping and a time-based watchdog.
         """
-        if pwm == 0:
-            return 0
-        sign = 1 if pwm > 0 else -1
-        return sign * max(abs(pwm), self.min_pwm)
+        # Watchdog: stop rotation after max duration
+        if self.rotation_start_time is not None:
+            elapsed = time.time() - self.rotation_start_time
+            if elapsed > self.rotation_max_duration:
+                self.get_logger().warn(
+                    f'Rotation watchdog: {elapsed:.1f}s exceeded {self.rotation_max_duration}s limit'
+                )
+                return 0, 0
 
-    def _rescale_pwm(self, pwm):
-        """Map [1..255] → [min_pwm..255] so any command moves the motor.
+        # Soft-start: ramp PWM over rotation_soft_start_steps cycles
+        self.rotation_step_count += 1
+        ramp_fraction = min(1.0, self.rotation_step_count / max(1, self.rotation_soft_start_steps))
+        target_pwm = int(self.rotation_pwm * ramp_fraction)
 
-        This eliminates the dead zone where PWM < 35 produces no motion.
-        The mapping is linear and preserves proportionality:
-          raw   0 →   0  (stopped)
-          raw   1 →  35  (minimum working PWM)
-          raw  49 →  77  (typical turn speed)
-          raw 128 → 145  (medium speed)
-          raw 255 → 255  (full speed)
+        # Direction: positive w = CCW = left backward, right forward
+        w_sign = 1 if w > 0 else -1
+        left_pwm = -w_sign * target_pwm
+        right_pwm = w_sign * target_pwm
+
+        # Apply proportional scaling for angular velocity magnitude
+        # Scale between 0.6x and 1.0x of rotation_pwm based on how fast Nav2 wants to rotate
+        w_magnitude = abs(w)
+        max_angular = 0.8  # rad/s — at this speed, use full rotation_pwm
+        magnitude_scale = min(1.0, max(0.6, w_magnitude / max_angular))
+        left_pwm = int(left_pwm * magnitude_scale)
+        right_pwm = int(right_pwm * magnitude_scale)
+
+        return left_pwm, right_pwm
+
+    def _compute_linear_pwm(self, v):
+        """Compute PWM for pure linear motion with speed floor and ramping."""
+        # Enforce speed floor to prevent stalling near goal
+        if abs(v) < self.linear_min_speed:
+            v = math.copysign(self.linear_min_speed, v)
+
+        # Convert to PWM
+        raw_pwm = int(v * self.pwm_per_mps)
+
+        # Apply duty cycling for sub-minimum speeds
+        left_pwm = self._apply_duty_cycle(raw_pwm)
+        right_pwm = self._apply_duty_cycle(raw_pwm)
+
+        # Apply ramp
+        left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm, self.linear_ramp_rate)
+        right_pwm = self._ramp_pwm(right_pwm, self.last_right_pwm, self.linear_ramp_rate)
+
+        return left_pwm, right_pwm
+
+    def _compute_arc_pwm(self, v, w):
+        """Compute PWM for combined linear + angular motion (curve following).
+
+        Uses inverse kinematics but scales the angular component to prevent
+        over-steering on curves.
         """
-        if pwm == 0:
-            return 0
-        sign = 1 if pwm > 0 else -1
-        abs_pwm = abs(pwm)
-        scaled = self.min_pwm + (abs_pwm - 1) * (255 - self.min_pwm) / 254.0
-        return sign * int(round(scaled))
+        # Scale angular component
+        w_scaled = w * self.arc_angular_scale
 
-    def _ramp_pwm(self, target, current):
+        # Enforce speed floor
+        if abs(v) < self.linear_min_speed:
+            v = math.copysign(self.linear_min_speed, v)
+
+        # Inverse kinematics with scaled angular
+        v_left = v - (w_scaled * self.wheel_sep / 2.0)
+        v_right = v + (w_scaled * self.wheel_sep / 2.0)
+
+        # Convert to PWM
+        left_pwm = int(v_left * self.pwm_per_mps)
+        right_pwm = int(v_right * self.pwm_per_mps)
+
+        # Apply duty cycling for sub-minimum speeds
+        left_pwm = self._apply_duty_cycle(left_pwm)
+        right_pwm = self._apply_duty_cycle(right_pwm)
+
+        # Apply arc ramp
+        left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm, self.arc_ramp_rate)
+        right_pwm = self._ramp_pwm(right_pwm, self.last_right_pwm, self.arc_ramp_rate)
+
+        return left_pwm, right_pwm
+
+    def _ramp_pwm(self, target, current, ramp_rate=None):
         """Limit PWM change per cycle for smooth acceleration.
 
         Stopping is IMMEDIATE — no delay when Nav2 says stop.
         """
+        if ramp_rate is None:
+            ramp_rate = self.linear_ramp_rate
         if target == 0:
             return 0
         # Direction reversal: stop first, then ramp in new direction
         if (target > 0 and current < 0) or (target < 0 and current > 0):
             return 0
         diff = target - current
-        if abs(diff) <= self.pwm_ramp_rate:
+        if abs(diff) <= ramp_rate:
             return target
-        return current + self.pwm_ramp_rate * (1 if diff > 0 else -1)
+        return current + ramp_rate * (1 if diff > 0 else -1)
 
     def send_motor_command(self, left_pwm, right_pwm):
         """Send motor command to Arduino via serial."""

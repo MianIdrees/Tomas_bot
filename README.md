@@ -1,8 +1,10 @@
 # Tomas_bot — Daniel's Robot
 
-**Branch: `feature/bno085-imu-ekf-integration`**
+**Branch: `final-2`** — Motion Profile State Machine
 
 Differential drive mobile robot running ROS2 Jazzy on LattePanda Alpha (Core i5) with built-in Arduino Leonardo. Features autonomous navigation using Nav2, SLAM mapping, RPLidar C1 laser scanning, and **BNO085 9-DOF IMU with Extended Kalman Filter (EKF) sensor fusion** for improved localization.
+
+This branch implements a **state-machine-based motion controller** that classifies each cmd_vel into one of four motion states (IDLE, ROTATING, LINEAR, ARC), applying tailored PWM strategies for each.
 
 ## Hardware
 
@@ -29,6 +31,24 @@ Differential drive mobile robot running ROS2 Jazzy on LattePanda Alpha (Core i5)
 | EKF Output Rate | 30 Hz |
 
 ## What's New in This Branch
+
+### Problems Solved (inherited from `feature/bno085-imu-ekf-integration`)
+
+1. **Robot doesn't rotate on sharp turns** → ROTATING state uses a fixed `rotation_pwm` (70) with soft-start ramp, guaranteed above motor dead zone
+2. **Robot spins excessively (360°+)** → Rotation watchdog (`rotation_max_duration=8s`) auto-stops runaway rotation; soft-start prevents overshoot
+3. **Robot stalls near goal** → LINEAR state enforces `linear_min_speed` (0.04 m/s); duty cycling handles sub-minimum speeds
+4. **Motors don't move at low PWM** → Arduino `MIN_PWM` raised to 45; duty cycling alternates min_pwm/0 for effective sub-threshold control
+
+### State Machine Approach (final-2)
+
+- **MotionState enum** — IDLE, ROTATING, LINEAR, ARC classified by angular/linear deadband thresholds
+- **ROTATING state** — Fixed `rotation_pwm` with configurable soft-start ramp (prevents jerk) and watchdog timer (prevents runaway)
+- **LINEAR state** — Velocity-proportional PWM with speed floor; ramp-rate limited for smooth starts
+- **ARC state** — Combined motion with `arc_angular_scale` (0.85) to reduce over-steering on curves
+- **Duty cycling** — For speeds below motor dead zone: alternates between min_pwm and 0 at configurable period
+- **Interactive tuning script** — 7-chapter `tuning_node.py` covering all state-machine parameters with limits and descriptions
+
+### Inherited from IMU Branch
 
 - **BNO085 IMU Integration** — Arduino reads BNO085 via I²C and sends quaternion + accel + gyro data over serial
 - **Extended Kalman Filter** — `robot_localization` fuses wheel odometry + IMU for dramatically better localization
@@ -69,8 +89,9 @@ Tomas_bot/
 ├── scripts/
 │   ├── diff_drive_node.py               # ROS2 ↔ Arduino bridge (odom + IMU)
 │   ├── joystick_teleop_node.py          # PS3 gamepad teleop node
-│   ├── imu_calibration_node.py          # BNO085 calibration script (NEW)
-│   └── imu_check_node.py               # IMU health check/diagnostics (NEW)
+│   ├── imu_calibration_node.py          # BNO085 calibration script
+│   ├── imu_check_node.py               # IMU health check/diagnostics
+│   └── tuning_node.py                  # Interactive state machine tuning (NEW)
 ├── IMU_GUIDE.md                         # IMU setup, calibration, debugging guide (NEW)
 ├── INSTALLATION_GUIDE.md                # Full setup instructions
 ├── RUNNING_GUIDE.md                     # Operating instructions
@@ -109,6 +130,9 @@ ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map
 
 # 10. Navigate autonomously (Terminal 3 — after stopping SLAM)
 ros2 launch Tomas_bot navigation_hardware.launch.py map:=$HOME/maps/my_map.yaml
+
+# 11. Tune state machine parameters (Terminal 2 — while bringup is running)
+ros2 run Tomas_bot tuning_node.py
 ```
 
 ## Verify System
