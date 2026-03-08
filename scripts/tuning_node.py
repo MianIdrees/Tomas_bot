@@ -68,7 +68,6 @@ class TuningNode(Node):
         x0, y0, yaw0 = self.x, self.y, self.yaw
         t0 = time.time()
         last_print = -1.0
-        rate = self.create_rate(20)
 
         hdr = (f'    │ {"Time":>5s}  {"Cmd v":>6s} {"Cmd w":>6s} │ '
                f'{"Odom v":>6s} {"Odom w":>6s} │ {"Dist":>6s}  {"ΔYaw":>7s} │ Status')
@@ -100,7 +99,7 @@ class TuningNode(Node):
                       f'{self.odom_v:6.3f} {self.odom_w:6.3f} │ '
                       f'{dist:5.3f}m  {dyaw:+6.1f}° │ {st}')
                 last_print = elapsed
-            rate.sleep()
+            time.sleep(0.05)
 
         stop = Twist()
         for _ in range(5):
@@ -582,7 +581,6 @@ class TuningNode(Node):
         msg.angular.z = 0.5
         t0 = time.time()
         yaw0 = self.yaw
-        rate = self.create_rate(20)
         last_print = -1.0
 
         print(f'    ┌─────────────────────────────────────────────────────────────')
@@ -605,7 +603,7 @@ class TuningNode(Node):
                     st = '✓ rotating'
                 print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {dyaw:+6.1f}° │ {st}')
                 last_print = elapsed
-            rate.sleep()
+            time.sleep(0.05)
 
         stop = Twist()
         for _ in range(5):
