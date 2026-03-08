@@ -413,25 +413,23 @@ class DiffDriveNode(Node):
     def _compute_rotation_pwm(self, w):
         """Compute PWM for pure in-place rotation with soft-start and watchdog.
 
-        Soft-start ramps from min_pwm to rotation_pwm. Magnitude scaling
-        provides proportional speed control: lower Nav2 commands → slower
-        rotation → less coast overshoot. Sub-min PWM values are duty-cycled
-        (alternating between min_pwm and 0) rather than clamped, giving
-        actual proportional angular velocity control.
-
-        Data-driven: diagnostic showed all cmd_w values produced identical
-        ~1.0 rad/s rotation due to dead-zone clamping. With duty cycling:
-          w=0.3 → ~0.5 rad/s, coast ~12°
-          w=0.5 → ~0.7 rad/s, coast ~18°
-          w=0.8 → ~1.0 rad/s, coast ~25°
+        Soft-start ramps from min_pwm to rotation_pwm over several cycles.
+        The motor dead zone (~PWM 52) means the robot's minimum rotation speed
+        is hardware-limited at ~1.0 rad/s regardless of commanded velocity.
+        Nav2's rotate_to_heading_min_angle (set above coast overshoot) prevents
+        oscillation — the motor layer just needs to reliably produce rotation.
         """
-        # Watchdog: stop rotation after max duration
+        # Watchdog: stop rotation after max duration, force IDLE
         if self.rotation_start_time is not None:
             elapsed = time.time() - self.rotation_start_time
             if elapsed > self.rotation_max_duration:
                 self.get_logger().warn(
-                    f'Rotation watchdog: {elapsed:.1f}s exceeded {self.rotation_max_duration}s limit'
+                    f'Rotation watchdog: {elapsed:.1f}s exceeded '
+                    f'{self.rotation_max_duration}s limit — forcing IDLE'
                 )
+                self.motion_state = MotionState.IDLE
+                self.rotation_start_time = None
+                self.rotation_step_count = 0
                 return 0, 0
 
         # Soft-start: ramp from min_pwm to rotation_pwm
@@ -442,19 +440,12 @@ class DiffDriveNode(Node):
         # Direction: positive w = CCW = left backward, right forward
         w_sign = 1 if w > 0 else -1
 
-        # Proportional scaling: higher commanded ω → more of the PWM range
-        w_magnitude = abs(w)
-        max_angular = 0.8  # rad/s — at this speed, use full rotation_pwm
-        magnitude_scale = min(1.0, w_magnitude / max_angular)
-        scaled_pwm = int(target_pwm * magnitude_scale)
+        # Dead-zone clamp: ensure PWM is at least min_pwm so motors actually spin
+        if target_pwm < self.min_pwm:
+            target_pwm = self.min_pwm
 
-        # Duty cycling: sub-min PWM alternates between min_pwm and 0
-        # This replaces the old dead-zone clamp that forced everything to
-        # min_pwm (making all rotation speeds identical at ~1.0 rad/s).
-        left_raw = -w_sign * scaled_pwm
-        right_raw = w_sign * scaled_pwm
-        left_pwm = self._apply_duty_cycle(left_raw)
-        right_pwm = self._apply_duty_cycle(right_raw)
+        left_pwm = -w_sign * target_pwm
+        right_pwm = w_sign * target_pwm
 
         return left_pwm, right_pwm
 
