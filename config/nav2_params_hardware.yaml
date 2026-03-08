@@ -70,7 +70,7 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    default_server_timeout: 30
+    default_server_timeout: 10000    # 10 seconds — planner needs time to ACK under CPU load
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
     navigators: ["navigate_to_pose", "navigate_through_poses"]
@@ -86,7 +86,7 @@ controller_server:
   ros__parameters:
     use_sim_time: false
     controller_frequency: 15.0    # Higher freq OK on LattePanda i5
-    costmap_update_timeout: 0.50
+    costmap_update_timeout: 2.0       # Generous — prevents failure when costmap is slow
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -115,7 +115,7 @@ controller_server:
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
       rotate_to_heading_angular_vel: 0.8   # [SPEED][TURNING] Speed for in-place rotation (only at sharp corners)
-      rotate_to_heading_min_angle: 1.2     # [TURNING] ~69° — only stop-and-rotate for sharp corners
+      rotate_to_heading_min_angle: 1.57    # [TURNING] 90° — only stop-and-rotate for >90° heading errors; everything else arcs
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true   # Scale lookahead with speed for smoother curves
       min_approach_linear_velocity: 0.04   # [SPEED] Raised from 0.02 — must produce PWM above dead zone
@@ -127,7 +127,7 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.08  # Raised: ensures min speed stays well above motor dead zone
       allow_reversing: false
-      max_angular_accel: 1.2               # [SPEED][TURNING] Higher angular accel for smooth arcing turns
+      max_angular_accel: 1.6               # [SPEED][TURNING] Higher angular accel for responsive smooth arcing turns
       max_robot_pose_search_dist: 10.0
 
 planner_server:
@@ -215,6 +215,7 @@ local_costmap:
       publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_link
+      transform_tolerance: 0.5     # Tolerate late laser scans (prevents 'earlier than cache' drops)
       rolling_window: true
       width: 3
       height: 3
@@ -249,6 +250,7 @@ global_costmap:
       publish_frequency: 0.5         # Lower for compute savings
       global_frame: map
       robot_base_frame: base_link
+      transform_tolerance: 0.5     # Tolerate late laser scans
       robot_radius: 0.15
       resolution: 0.05
       track_unknown_space: true

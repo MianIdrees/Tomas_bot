@@ -79,16 +79,17 @@ class DiffDriveNode(Node):
         # If robot over-rotates → decrease toward 0.5-0.7
         # If robot under-rotates → increase toward 1.3-1.5
 
-        self.declare_parameter('rotation_min_pwm', 30)
+        self.declare_parameter('rotation_min_pwm', 40)
         # [TUNING] Minimum PWM floor for in-place rotation commands.
         # Pure rotation skips PWM rescaling (which over-amplifies rotation), so
         # this is just a simple floor on the raw IK PWM.
-        # Range: 15 to 60.
-        # At 15: motors can barely overcome stiction — Nav2 turns take 5-10s.
-        # At 30: responsive rotation start (<1s), Nav2 can progress.
-        # At 40+: risk of over-rotation (was 2.9x at 40 with rescaling).
-        # If Nav2 turns too slow → increase (try 35)
-        # If robot over-shoots turns → decrease (try 25)
+        # MUST be >= Arduino MIN_PWM (40) to avoid duty-cycling jerk.
+        # Range: 40 to 60.
+        # At 30: below Arduino MIN_PWM → duty-cycling between 0 and 40 = jerky rotation.
+        # At 40: matches Arduino MIN_PWM → smooth continuous rotation.
+        # At 50+: risk of over-rotation.
+        # If Nav2 turns too slow → increase (try 45)
+        # If robot over-shoots turns → decrease to 40 (never below)
 
         # --- NEW: Anti-spin protection ---
         self.declare_parameter('max_continuous_rotation_deg', 270.0)
