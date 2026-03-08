@@ -221,8 +221,9 @@ class TuningNode(Node):
 
     HOW THE STATE MACHINE HANDLES ROTATION:
       Unlike final-1 (which multiplies PWM), final-2 uses a FIXED PWM value
-      (rotation_pwm = 57) for all rotations, with a soft-start ramp.
+      (rotation_pwm = 65) for all rotations, with a soft-start ramp.
       The PWM is scaled by angular velocity (floor = min_pwm/rotation_pwm).
+      Soft-start ramps from min_pwm to rotation_pwm (never below dead zone).
 
     WHAT TO LOOK FOR in the live table:
       - "Odom w" should be non-zero = robot is actually rotating!
@@ -246,7 +247,7 @@ class TuningNode(Node):
             print(f'\n    ── Test: rotate CCW at w={w:.1f} rad/s for {duration:.1f}s (target: 90°) ──')
             input(f'    Press ENTER to run this test...')
             _, dyaw = self._send(0.0, w, duration)
-            time.sleep(1.0)
+            time.sleep(2.0)
 
             error = dyaw - target
             error_pct = (error / target) * 100
@@ -278,13 +279,13 @@ class TuningNode(Node):
 
         # Auto-recommend rotation_pwm
         avg_error_pct = sum(r[3] for r in results) / len(results)
-        current_pwm = 57
+        current_pwm = 65
 
         if avg_error_pct < -25:
-            rec_pwm = min(current_pwm + 15, 130)
+            rec_pwm = min(current_pwm + 10, 130)
             pwm_note = 'Robot under-rotates on average → INCREASE rotation_pwm'
         elif avg_error_pct > 25:
-            rec_pwm = max(current_pwm - 10, 57)
+            rec_pwm = max(current_pwm - 5, 57)
             pwm_note = 'Robot over-rotates on average → DECREASE rotation_pwm'
         else:
             rec_pwm = current_pwm
@@ -293,14 +294,14 @@ class TuningNode(Node):
         # Check if soft-start helps
         first_result = results[0]  # lowest speed
         if abs(first_result[1]) < 15 and abs(results[-1][1]) > 60:
-            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 18'
-            rec_soft = 18
+            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 8'
+            rec_soft = 8
         elif any(abs(r[2]) > 30 for r in results):
-            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 18'
-            rec_soft = 18
+            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 8'
+            rec_soft = 8
         else:
-            soft_note = 'Soft-start at 15 steps is working well'
-            rec_soft = 15
+            soft_note = 'Soft-start at 5 steps is working well'
+            rec_soft = 5
 
         self.best['rotation_pwm'] = rec_pwm
         self.best['rotation_soft_start_steps'] = rec_soft
@@ -667,8 +668,8 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 57)
-        rot_pwm = b.get('rotation_pwm', 57)
-        rot_soft = b.get('rotation_soft_start_steps', 15)
+        rot_pwm = b.get('rotation_pwm', 65)
+        rot_soft = b.get('rotation_soft_start_steps', 5)
         lin_min = b.get('linear_min_speed', 0.10)
         arc_scale = b.get('arc_angular_scale', 0.90)
 
@@ -783,14 +784,14 @@ class TuningNode(Node):
                 ('linear_deadband', 0.005, 0.001, 0.02,
                  'Linear velocity below this → state = IDLE (no movement).\n'
                  '          Keep very low so Nav2 approach commands pass through.'),
-                ('rotation_pwm', rot_pwm, 45, 130,
-                 'Fixed PWM sent to motors during ROTATING state.\n'
-                 '          Scaled 0.6x-1.0x by angular velocity magnitude.\n'
+                ('rotation_pwm', rot_pwm, 57, 130,
+                 'Target PWM for ROTATING state. Soft-start ramps from min_pwm to this.\n'
+                 '          Robot responds immediately (never below dead zone).\n'
                  '          Increase if robot won\'t rotate. Decrease if over-rotating.'),
                 ('rotation_soft_start_steps', rot_soft, 1, 15,
-                 'Number of 50ms cycles to ramp from 0 to rotation_pwm.\n'
-                 '          More steps = gentler start = less overshoot.\n'
-                 '          At 5 steps: 250ms ramp. At 10: 500ms ramp.'),
+                 'Number of 50ms cycles to ramp from min_pwm to rotation_pwm.\n'
+                 '          Robot moves from cycle 1 (always above dead zone).\n'
+                 '          At 5 steps: 250ms ramp. At 8: 400ms ramp.'),
                 ('rotation_max_duration', 6.0, 2.0, 15.0,
                  'Watchdog: max seconds of continuous rotation before stopping.\n'
                  '          At 0.5 rad/s and 6s: allows ≈170° rotation.'),
@@ -924,8 +925,8 @@ class TuningNode(Node):
     │      Line ~72:  min_pwm .................. default: 57           │
     │      Line ~80:  angular_deadband ......... default: 0.03         │
     │      Line ~86:  linear_deadband .......... default: 0.005        │
-    │      Line ~92:  rotation_pwm ............. default: 57           │
-    │      Line ~101: rotation_soft_start_steps  default: 15           │
+    │      Line ~92:  rotation_pwm ............. default: 65           │
+    │      Line ~101: rotation_soft_start_steps  default: 5            │
     │      Line ~109: rotation_max_duration .... default: 6.0          │
     │      Line ~117: linear_ramp_rate ......... default: 35           │
     │      Line ~125: linear_min_speed ......... default: 0.10         │

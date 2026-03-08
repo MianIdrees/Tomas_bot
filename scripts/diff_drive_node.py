@@ -89,21 +89,22 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 57)
-        # [TUNING] Base PWM for in-place rotation. This is the target PWM after soft-start.
-        # Range: 57 to 130. At 57 = min_pwm → lowest possible rotation speed.
-        # Round 3: still over-rotating at 65 (0.3–0.5 rad/s tests 43–163% over).
-        # At 57, robot gets absolute minimum viable PWM for rotation.
-        # If robot doesn't rotate at all → increase (try 60, 65, 70).
-        # If robot over-rotates or spins too fast → this is already at minimum.
+        self.declare_parameter('rotation_pwm', 65)
+        # [TUNING] Base PWM for in-place rotation. Target PWM after soft-start completes.
+        # Range: 57 to 130. Set above min_pwm to give soft-start a ramp range.
+        # Soft-start ramps from min_pwm (57) to this value, so robot responds immediately.
+        # At 65: ramp range is 57→65 (small, gentle). Robot physically spins at ~1.0 rad/s
+        # regardless (min rotation speed is hardware-limited). Nav2 handles via closed-loop.
+        # If robot doesn't rotate at all → increase (try 70, 75).
+        # If rotation overshoots in Nav2 → decrease toward 60.
 
-        self.declare_parameter('rotation_soft_start_steps', 15)
-        # [TUNING] Number of control cycles (at 20Hz) to ramp up to rotation_pwm.
-        # Range: 1 to 20. Tuned up from 12: further reduces momentum overshoot.
-        # At 15 steps and 20Hz → takes 0.75s to reach full rotation PWM.
-        # Higher → gentler start (less jerk, less overshoot). Lower → faster response.
-        # If robot jerks when starting rotation → increase to 18.
-        # If rotation feels sluggish to start → decrease to 10.
+        self.declare_parameter('rotation_soft_start_steps', 5)
+        # [TUNING] Number of control cycles (at 20Hz) to ramp from min_pwm to rotation_pwm.
+        # Range: 1 to 15. Ramp is now min_pwm→rotation_pwm (57→65 = 8 PWM range).
+        # At 5 steps and 20Hz → 250ms ramp. Robot moves from the FIRST cycle.
+        # Higher → gentler acceleration. Lower → faster to full speed.
+        # If rotation jerks at start → increase to 8.
+        # If rotation feels sluggish → decrease to 3.
 
         self.declare_parameter('rotation_max_duration', 6.0)
         # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
@@ -412,9 +413,9 @@ class DiffDriveNode(Node):
     def _compute_rotation_pwm(self, w):
         """Compute PWM for pure in-place rotation with soft-start and watchdog.
 
-        Instead of converting angular velocity to proportional PWM (which falls
-        below the dead zone for small angles), use a fixed rotation_pwm and
-        control it with soft-start ramping and a time-based watchdog.
+        Soft-start ramps from min_pwm to rotation_pwm (never below dead zone)
+        so the robot responds immediately on the first cycle. Magnitude scaling
+        provides slight proportional control for higher angular velocities.
         """
         # Watchdog: stop rotation after max duration
         if self.rotation_start_time is not None:
@@ -425,25 +426,28 @@ class DiffDriveNode(Node):
                 )
                 return 0, 0
 
-        # Soft-start: ramp PWM over rotation_soft_start_steps cycles
+        # Soft-start: ramp from min_pwm to rotation_pwm (always above dead zone)
         self.rotation_step_count += 1
         ramp_fraction = min(1.0, self.rotation_step_count / max(1, self.rotation_soft_start_steps))
-        target_pwm = int(self.rotation_pwm * ramp_fraction)
+        target_pwm = int(self.min_pwm + (self.rotation_pwm - self.min_pwm) * ramp_fraction)
 
         # Direction: positive w = CCW = left backward, right forward
         w_sign = 1 if w > 0 else -1
         left_pwm = -w_sign * target_pwm
         right_pwm = w_sign * target_pwm
 
-        # Apply proportional scaling for angular velocity magnitude
-        # Scale between min_floor and 1.0x of rotation_pwm based on how fast Nav2 wants to rotate
-        # Floor ensures output PWM is always >= min_pwm (prevents humming in dead zone)
+        # Proportional scaling: higher commanded ω → more of the PWM range
         w_magnitude = abs(w)
         max_angular = 0.8  # rad/s — at this speed, use full rotation_pwm
-        min_scale = self.min_pwm / max(1, self.rotation_pwm)  # dynamic floor: guarantees PWM >= min_pwm
-        magnitude_scale = min(1.0, max(min_scale, w_magnitude / max_angular))
+        magnitude_scale = min(1.0, w_magnitude / max_angular)
         left_pwm = int(left_pwm * magnitude_scale)
         right_pwm = int(right_pwm * magnitude_scale)
+
+        # Clamp: never send sub-minimum PWM during active rotation (avoids dead zone hum)
+        if left_pwm != 0 and abs(left_pwm) < self.min_pwm:
+            left_pwm = int(math.copysign(self.min_pwm, left_pwm))
+        if right_pwm != 0 and abs(right_pwm) < self.min_pwm:
+            right_pwm = int(math.copysign(self.min_pwm, right_pwm))
 
         return left_pwm, right_pwm
 
