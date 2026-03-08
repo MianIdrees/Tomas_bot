@@ -195,13 +195,10 @@ class TuningNode(Node):
         if moved_list:
             min_speed, _, raw_pwm = moved_list[0]
             best_min_pwm = max(raw_pwm + 5, 40)
-            best_rot_min = best_min_pwm + 15
         else:
             best_min_pwm = 60
-            best_rot_min = 75
 
         self.best['min_pwm'] = best_min_pwm
-        self.best['rotation_min_pwm'] = best_rot_min
 
         self._box([
             'CHAPTER 1 RESULTS',
@@ -216,13 +213,12 @@ class TuningNode(Node):
             f'First speed that moved: {moved_list[0][0]:.2f} m/s (PWM ≈ {moved_list[0][2]})' if moved_list
             else 'Robot did NOT move at any speed! Check hardware.',
             '',
-            '>>> BEST VALUES TO NOTE:',
-            f'    min_pwm         = {best_min_pwm}  (dead zone + 5 safety margin)',
-            f'    rotation_min_pwm = {best_rot_min}  (min_pwm + 15 for rotation torque)',
+            '>>> BEST VALUE TO NOTE:',
+            f'    min_pwm = {best_min_pwm}  (dead zone + 5 safety margin)',
             '',
-            'WHAT THESE MEAN:',
+            'WHAT THIS MEANS:',
             f'  min_pwm: any motor command below PWM {best_min_pwm} is wasted energy.',
-            f'  rotation_min_pwm: rotation from standstill needs even more ({best_rot_min}).',
+            '  rotation_min_pwm is determined separately in Chapter 3.',
         ])
 
     # ====================================================================
@@ -357,8 +353,8 @@ class TuningNode(Node):
                 print(f'       ✓ GOOD — close to 90° target')
             elif error > 25:
                 print(f'       ⚠ OVER-ROTATED by {error:.0f}° (spun {dyaw:.0f}° instead of 90°)')
-                print(f'         → decrease rotation_boost_factor (closer to 1.0)')
-                print(f'         → decrease rotation_min_pwm (closer to min_pwm)')
+                print(f'         → decrease rotation_boost_factor (try 0.5-0.7)')
+                print(f'         → decrease rotation_min_pwm (try 10-15)')
             else:
                 print(f'       ⚠ UNDER-ROTATED by {abs(error):.0f}°')
                 print(f'         → increase rotation_boost_factor or rotation_min_pwm')
@@ -379,28 +375,32 @@ class TuningNode(Node):
         # Calculate how aggressive the recommendation should be
         # based on how far off the rotation is
         if avg_error_pct > 200:
-            rec_boost = 1.0
-            rec_min_pwm = 40
-            boost_note = 'Robot MASSIVELY over-rotates → boost=1.0, rotation_min_pwm=min_pwm'
+            rec_boost = 0.5
+            rec_min_pwm = 10
+            boost_note = 'Robot MASSIVELY over-rotates → halve boost, minimal floor'
+        elif avg_error_pct > 100:
+            rec_boost = 0.6
+            rec_min_pwm = 12
+            boost_note = 'Robot over-rotates heavily → reduce boost significantly'
         elif avg_error_pct > 50:
-            rec_boost = 1.0
-            rec_min_pwm = 40
-            boost_note = 'Robot over-rotates → boost=1.0, rotation_min_pwm=min_pwm'
+            rec_boost = 0.7
+            rec_min_pwm = 15
+            boost_note = 'Robot over-rotates → reduce boost'
         elif avg_error_pct > 20:
-            rec_boost = 1.0
-            rec_min_pwm = 40
-            boost_note = 'Robot slightly over-rotates → boost=1.0'
+            rec_boost = 0.85
+            rec_min_pwm = 15
+            boost_note = 'Robot slightly over-rotates → slight boost reduction'
         elif avg_error_pct < -50:
             rec_boost = min(current_boost + 0.3, 1.8)
-            rec_min_pwm = 55
-            boost_note = 'Robot under-rotates significantly → INCREASE boost and rotation_min_pwm'
+            rec_min_pwm = 30
+            boost_note = 'Robot under-rotates significantly → INCREASE boost and floor'
         elif avg_error_pct < -20:
             rec_boost = min(current_boost + 0.15, 1.5)
-            rec_min_pwm = 50
+            rec_min_pwm = 25
             boost_note = 'Robot under-rotates → INCREASE boost slightly'
         else:
             rec_boost = current_boost
-            rec_min_pwm = 40
+            rec_min_pwm = 15
             boost_note = 'Current settings are working well — keep them'
 
         self.best['rotation_boost_factor'] = rec_boost
@@ -430,9 +430,9 @@ class TuningNode(Node):
             '',
             'HOW TO INTERPRET:',
             '  The boost factor multiplies PWM during pure in-place rotation.',
-            f'  At {rec_boost:.2f}: rotation gets {rec_boost*100-100:.0f}% more PWM than normal.',
-            f'  rotation_min_pwm = {rec_min_pwm}: minimum PWM sent during pure rotation.',
-            '  If still over-rotating → lower both. If under-rotating → raise both.',
+            f'  At {rec_boost:.2f}: rotation gets {rec_boost*100-100:+.0f}% PWM vs normal IK output.',
+            f'  rotation_min_pwm = {rec_min_pwm}: minimum PWM floor for pure rotation.',
+            '  If still over-rotating → lower boost. If under-rotating → raise both.',
         ])
 
     # ====================================================================
@@ -561,7 +561,7 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 40)
-        rot_min = b.get('rotation_min_pwm', 40)
+        rot_min = b.get('rotation_min_pwm', 15)
         boost = b.get('rotation_boost_factor', 1.0)
         approach = b.get('approach_min_linear_speed', 0.04)
 
@@ -599,9 +599,9 @@ class TuningNode(Node):
                                                                  ^^^
                  Change 1.0 → {boost:.2f}
 
-      Line ~81:  self.declare_parameter('rotation_min_pwm', 40)
+      Line ~81:  self.declare_parameter('rotation_min_pwm', 15)
                                                             ^^
-                 Change 40 → {rot_min}
+                 Change 15 → {rot_min}
 
       Line ~104: self.declare_parameter('approach_min_linear_speed', 0.04)
                                                                      ^^^^
@@ -662,12 +662,12 @@ class TuningNode(Node):
                 ('min_pwm', min_pwm, 25, 80,
                  'Motor dead zone threshold. Below this PWM, wheels don\'t turn.\n'
                  '          MUST match Arduino MIN_PWM. Increase if robot stalls.'),
-                ('rotation_min_pwm', rot_min, 40, 120,
-                 'Minimum PWM for in-place rotation. Higher than min_pwm because\n'
-                 '          starting rotation from standstill needs extra torque.'),
-                ('rotation_boost_factor', boost, 1.0, 2.0,
-                 'Multiplier on PWM during pure rotation (no forward speed).\n'
-                 '          1.0 = no boost. Increase if under-rotating.'),
+                ('rotation_min_pwm', rot_min, 10, 60,
+                 'Minimum PWM floor for pure rotation (no rescaling applied).\n'
+                 '          Low values let the Arduino PID duty-cycle for accuracy.'),
+                ('rotation_boost_factor', boost, 0.3, 2.0,
+                 'Multiplier on PWM during pure rotation. Applied to raw IK output.\n'
+                 '          1.0 = no change. <1.0 = dampen. >1.0 = boost.'),
                 ('approach_min_linear_speed', approach, 0.02, 0.10,
                  'Speed floor near goal. Prevents motor stall during final approach.\n'
                  '          Increase if robot stalls near goal. Decrease if it overshoots.'),
@@ -794,7 +794,7 @@ colcon build --packages-select Tomas_bot
     │      Line ~65:  linear_deadband ............. default: 0.005     │
     │      Line ~66:  pwm_ramp_rate ............... default: 40        │
     │      Line ~74:  rotation_boost_factor ....... default: 1.0       │
-    │      Line ~81:  rotation_min_pwm ............ default: 40        │
+    │      Line ~81:  rotation_min_pwm ............ default: 15        │
     │      Line ~90:  max_continuous_rotation_deg . default: 270.0     │
     │      Line ~98:  anti_spin_angular_clamp ..... default: 0.3       │
     │      Line ~104: approach_min_linear_speed ... default: 0.04      │

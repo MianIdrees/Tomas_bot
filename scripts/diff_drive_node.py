@@ -73,21 +73,23 @@ class DiffDriveNode(Node):
         # --- NEW: Rotation boost parameters ---
         self.declare_parameter('rotation_boost_factor', 1.0)
         # [TUNING] Multiplier for PWM during pure in-place rotation (no linear velocity).
-        # Heavy robots need extra torque to overcome friction when spinning in place.
-        # Range: 1.0 (no boost) to 2.0 (double PWM).
-        # TUNING RESULT: Robot over-rotates massively at 1.35 (Odom w 3-7x commanded).
-        # Lowered to 1.0 — the min_pwm rescaling already provides enough torque.
-        # If robot doesn't rotate at all on sharp turns → increase toward 1.2
-        # If robot over-rotates/spins too much → decrease toward 1.0
+        # Applied to raw IK PWM before the min-PWM floor.
+        # Range: 0.3 (strong damping) to 2.0 (double PWM). Default: 1.0 (no change).
+        # Since rotation skips PWM rescaling, this directly scales the raw command.
+        # If robot over-rotates → decrease toward 0.5-0.7
+        # If robot under-rotates → increase toward 1.3-1.5
 
-        self.declare_parameter('rotation_min_pwm', 40)
-        # [TUNING] Minimum PWM specifically for in-place rotation commands.
-        # This is higher than the general min_pwm because starting rotation from
-        # standstill on a heavy robot requires more torque than maintaining linear motion.
-        # Range: 40 to 100. Must be >= min_pwm. Must be <= 120 or robot may jerk violently.
-        # TUNING RESULT: At 55, robot spins at 1.0-1.7 rad/s when only 0.2-0.5 commanded.
-        # Lowered to match min_pwm=40. Boost+rescaling already provides enough torque.
-        # If robot doesn't start rotating → increase (try 50, 55)
+        self.declare_parameter('rotation_min_pwm', 15)
+        # [TUNING] Minimum PWM floor for in-place rotation commands.
+        # Pure rotation skips PWM rescaling (which over-amplifies rotation), so
+        # this is just a simple floor on the raw IK PWM.
+        # The Arduino PID duty-cycles below its internal MIN_PWM, so very low
+        # values (10-20) produce slow but accurate rotation.
+        # Range: 10 to 60.
+        # TUNING RESULT: With rescaling disabled for rotation, raw IK values
+        # (11-47 for w=0.2-0.8) pass through with just this floor.
+        # If robot doesn't start rotating at low w → increase (try 20, 25)
+        # If robot over-rotates at low w → decrease (try 10)
         # If robot over-rotates/spins → keep at 40
 
         # --- NEW: Anti-spin protection ---
@@ -324,14 +326,19 @@ class DiffDriveNode(Node):
         right_pwm = max(-255, min(255, right_pwm))
 
         # --- Layer 5: PWM rescaling or min-PWM clamping ---
-        if self.use_pwm_rescaling:
-            effective_min = self.rotation_min_pwm if is_pure_rotation else self.min_pwm
-            left_pwm = self._rescale_pwm(left_pwm, effective_min)
-            right_pwm = self._rescale_pwm(right_pwm, effective_min)
+        # Pure rotation SKIPS rescaling. The rescaling maps [1,255] → [min_pwm,255],
+        # which over-amplifies small rotation commands (e.g. raw PWM 11 → 49).
+        # Rotation needs much less torque than linear motion, and the Arduino PID
+        # naturally duty-cycles below its MIN_PWM for accurate low-speed rotation.
+        if is_pure_rotation:
+            left_pwm = self._apply_min_pwm(left_pwm, self.rotation_min_pwm)
+            right_pwm = self._apply_min_pwm(right_pwm, self.rotation_min_pwm)
+        elif self.use_pwm_rescaling:
+            left_pwm = self._rescale_pwm(left_pwm, self.min_pwm)
+            right_pwm = self._rescale_pwm(right_pwm, self.min_pwm)
         else:
-            effective_min = self.rotation_min_pwm if is_pure_rotation else self.min_pwm
-            left_pwm = self._apply_min_pwm(left_pwm, effective_min)
-            right_pwm = self._apply_min_pwm(right_pwm, effective_min)
+            left_pwm = self._apply_min_pwm(left_pwm, self.min_pwm)
+            right_pwm = self._apply_min_pwm(right_pwm, self.min_pwm)
 
         # --- Layer 6: Smooth ramp ---
         left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm)
