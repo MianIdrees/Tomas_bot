@@ -89,12 +89,12 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 60)
+        self.declare_parameter('rotation_pwm', 58)
         # [TUNING] Base PWM for in-place rotation. Target PWM after soft-start completes.
         # Range: 57 to 130. Set above min_pwm to give soft-start a ramp range.
-        # At 60: just 3 above min_pwm (57). Slower rotation → less coast overshoot.
-        # If robot doesn't rotate at all → increase (try 65, 70).
-        # If rotation overshoots in Nav2 → decrease toward 58.
+        # At 58: just 1 above min_pwm (57). Minimal speed → minimal coast overshoot.
+        # If robot doesn't rotate at all → increase (try 60, 65).
+        # If rotation overshoots in Nav2 → decrease toward 57 (absolute minimum).
 
         self.declare_parameter('rotation_soft_start_steps', 2)
         # [TUNING] Number of control cycles to ramp from min_pwm to rotation_pwm.
