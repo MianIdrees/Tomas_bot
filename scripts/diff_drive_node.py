@@ -69,7 +69,7 @@ class DiffDriveNode(Node):
         self.declare_parameter('wheel_radius', 0.0345)     # 69mm wheels
         self.declare_parameter('ticks_per_rev', 528.0)     # 11 PPR x 48:1 gear (CALIBRATE)
         self.declare_parameter('max_motor_speed', 0.391)   # [SPEED] Measured: ~48 ticks/50ms × 20Hz × 0.000411 m/tick (raw PWM 255)
-        self.declare_parameter('min_pwm', 45)               # Raised: heavy 2.4kg robot dead zone. MUST match Arduino MIN_PWM.
+        self.declare_parameter('min_pwm', 57)               # Tuned: dead zone at PWM 52 + 5 margin. MUST match Arduino MIN_PWM.
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_tf', False)         # EKF publishes odom->base_link TF
@@ -89,19 +89,19 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 70)
+        self.declare_parameter('rotation_pwm', 85)
         # [TUNING] Base PWM for in-place rotation. This is the target PWM after soft-start.
-        # Range: 45 to 130.
+        # Range: 57 to 130.
         # This is a fixed PWM for rotation (not velocity-proportional) because at low angular
         # velocities the proportional PWM falls below dead zone. Instead, we use a fixed PWM
         # and control rotation duration/duty-cycle.
         # If robot doesn't rotate at all → increase (try 80, 90, 100).
         # If robot over-rotates or spins too fast → decrease (try 60, 55).
 
-        self.declare_parameter('rotation_soft_start_steps', 5)
+        self.declare_parameter('rotation_soft_start_steps', 8)
         # [TUNING] Number of control cycles (at 20Hz) to ramp up to rotation_pwm.
         # Range: 1 to 15.
-        # At 5 steps and 20Hz → takes 0.25s to reach full rotation PWM.
+        # At 8 steps and 20Hz → takes 0.40s to reach full rotation PWM.
         # Higher → gentler start (less jerk, less overshoot). Lower → faster response.
         # If robot jerks when starting rotation → increase to 8-10.
         # If rotation feels sluggish to start → decrease to 2-3.
@@ -122,12 +122,12 @@ class DiffDriveNode(Node):
         # If robot jerks when starting forward → decrease to 20.
         # If robot feels sluggish to accelerate → increase to 50.
 
-        self.declare_parameter('linear_min_speed', 0.04)
+        self.declare_parameter('linear_min_speed', 0.10)
         # [TUNING] Minimum linear speed when robot is supposed to be moving.
-        # Range: 0.02 to 0.10 m/s.
+        # Range: 0.02 to 0.15 m/s.
         # Prevents Nav2 from commanding speeds below motor dead zone near goal.
-        # If robot stalls near goal → increase (try 0.06, 0.08).
-        # If robot overshoots goal → decrease (try 0.03).
+        # If robot stalls near goal → increase (try 0.12, 0.15).
+        # If robot overshoots goal → decrease (try 0.08).
 
         # --- ARC state parameters ---
         self.declare_parameter('arc_ramp_rate', 30)
@@ -137,13 +137,13 @@ class DiffDriveNode(Node):
         # If robot wobbles on curves → decrease to 20.
         # If curves feel sluggish → increase to 45.
 
-        self.declare_parameter('arc_angular_scale', 0.85)
+        self.declare_parameter('arc_angular_scale', 0.95)
         # [TUNING] Scale factor for angular component during arc motion.
         # Range: 0.5 to 1.2.
         # Reduces angular influence when combined with linear to prevent over-steering.
-        # At 0.85: angular PWM contribution is 85% of calculated value.
-        # If robot over-steers on curves → decrease (try 0.7).
-        # If robot under-steers (wide turns) → increase (try 1.0).
+        # At 0.95: angular PWM contribution is 95% of calculated value.
+        # If robot over-steers on curves → decrease (try 0.85).
+        # If robot under-steers (wide turns) → increase (try 1.0, 1.05).
 
         # --- Duty cycling for sub-minimum speeds ---
         self.declare_parameter('duty_cycle_enabled', True)
@@ -152,10 +152,10 @@ class DiffDriveNode(Node):
         # When False: any speed below min_pwm is clamped to min_pwm (jumpy at low speeds).
         # Duty cycling gives smoother low-speed control but may cause slight pulsing.
 
-        self.declare_parameter('duty_cycle_period', 4)
+        self.declare_parameter('duty_cycle_period', 6)
         # [TUNING] Number of control cycles per duty-cycle period.
         # Range: 2 to 10.
-        # At 4 and 20Hz: period = 200ms. If target is 50% of min_pwm → 2 cycles ON, 2 OFF.
+        # At 6 and 20Hz: period = 300ms. If target is 50% of min_pwm → 3 cycles ON, 3 OFF.
         # Higher → smoother average but more visible pulsing. Lower → jerkier but faster response.
 
         # Load all parameters
@@ -427,10 +427,12 @@ class DiffDriveNode(Node):
         right_pwm = w_sign * target_pwm
 
         # Apply proportional scaling for angular velocity magnitude
-        # Scale between 0.6x and 1.0x of rotation_pwm based on how fast Nav2 wants to rotate
+        # Scale between min_floor and 1.0x of rotation_pwm based on how fast Nav2 wants to rotate
+        # Floor ensures output PWM is always >= min_pwm (prevents humming in dead zone)
         w_magnitude = abs(w)
         max_angular = 0.8  # rad/s — at this speed, use full rotation_pwm
-        magnitude_scale = min(1.0, max(0.6, w_magnitude / max_angular))
+        min_scale = self.min_pwm / max(1, self.rotation_pwm)  # dynamic floor: guarantees PWM >= min_pwm
+        magnitude_scale = min(1.0, max(min_scale, w_magnitude / max_angular))
         left_pwm = int(left_pwm * magnitude_scale)
         right_pwm = int(right_pwm * magnitude_scale)
 

@@ -206,13 +206,12 @@ static void bno_enableReport(uint8_t reportId, uint32_t interval_us) {
 #define RIGHT_MAX_TICKS         48    // Measured: right motor ticks at raw PWM 255 per 50ms
 
 // Minimum PWM to overcome motor stiction and L298N voltage drop
-// MUST MATCH diff_drive_node.py min_pwm parameter (default: 45)
-// Heavy 2.4kg robot requires higher min PWM to start moving
-// Branch final-2 uses 45 (higher than branch final-1's 40) because
-// the state machine approach relies on the Arduino PID to completely
+// MUST MATCH diff_drive_node.py min_pwm parameter (tuned: 57)
+// Heavy 2.4kg robot: dead zone measured at PWM 52, +5 safety margin
+// The state machine relies on the Arduino PID to completely
 // handle speeds at or above MIN_PWM, while sub-MIN speeds are
 // handled by duty cycling in diff_drive_node.py
-#define MIN_PWM  45
+#define MIN_PWM  57
 
 // PID gains — start conservative, tune on real hardware
 #define KP   1.0

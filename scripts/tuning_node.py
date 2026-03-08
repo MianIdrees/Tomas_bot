@@ -210,8 +210,8 @@ class TuningNode(Node):
 
     HOW THE STATE MACHINE HANDLES ROTATION:
       Unlike final-1 (which multiplies PWM), final-2 uses a FIXED PWM value
-      (rotation_pwm = 70) for all rotations, with a soft-start ramp.
-      The PWM is scaled 0.6x-1.0x based on how fast Nav2 wants to turn.
+      (rotation_pwm = 85) for all rotations, with a soft-start ramp.
+      The PWM is scaled by angular velocity (floor = min_pwm/rotation_pwm).
 
     WHAT TO LOOK FOR in the live table:
       - "Odom w" should be non-zero = robot is actually rotating!
@@ -226,7 +226,7 @@ class TuningNode(Node):
 ''')
         input('    Press ENTER to begin rotation tests...\n')
 
-        angular_speeds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8]
+        angular_speeds = [0.3, 0.4, 0.5, 0.6, 0.8]
         results = []
         target = 90.0
 
@@ -267,26 +267,29 @@ class TuningNode(Node):
 
         # Auto-recommend rotation_pwm
         avg_error_pct = sum(r[3] for r in results) / len(results)
-        current_pwm = 70
+        current_pwm = 85
 
-        if avg_error_pct < -30:
+        if avg_error_pct < -25:
             rec_pwm = min(current_pwm + 15, 130)
             pwm_note = 'Robot under-rotates on average → INCREASE rotation_pwm'
-        elif avg_error_pct > 30:
-            rec_pwm = max(current_pwm - 10, 45)
+        elif avg_error_pct > 25:
+            rec_pwm = max(current_pwm - 10, 57)
             pwm_note = 'Robot over-rotates on average → DECREASE rotation_pwm'
         else:
             rec_pwm = current_pwm
-            pwm_note = 'Current rotation_pwm (70) is working well — keep it'
+            pwm_note = f'Current rotation_pwm ({current_pwm}) is working well — keep it'
 
         # Check if soft-start helps
         first_result = results[0]  # lowest speed
-        if first_result[1] < 15 and results[-1][1] > 60:
-            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 8'
-            rec_soft = 8
+        if abs(first_result[1]) < 15 and abs(results[-1][1]) > 60:
+            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 10'
+            rec_soft = 10
+        elif any(abs(r[2]) > 30 for r in results):
+            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 10'
+            rec_soft = 10
         else:
-            soft_note = 'Soft-start seems fine at 5 steps'
-            rec_soft = 5
+            soft_note = 'Soft-start at 8 steps is working well'
+            rec_soft = 8
 
         self.best['rotation_pwm'] = rec_pwm
         self.best['rotation_soft_start_steps'] = rec_soft
@@ -456,16 +459,16 @@ class TuningNode(Node):
         avg_yaw_error = sum(abs(r[6]) for r in arc_results) / len(arc_results)
         avg_signed = sum(r[6] for r in arc_results) / len(arc_results)
 
-        current_scale = 0.85
-        if avg_signed > 20:
-            rec_scale = max(current_scale - 0.1, 0.5)
+        current_scale = 0.95
+        if avg_signed > 15:
+            rec_scale = max(current_scale - 0.10, 0.5)
             scale_note = 'Over-steering on average → DECREASE arc_angular_scale'
-        elif avg_signed < -20:
-            rec_scale = min(current_scale + 0.1, 1.2)
+        elif avg_signed < -15:
+            rec_scale = min(current_scale + 0.10, 1.2)
             scale_note = 'Under-steering on average → INCREASE arc_angular_scale'
         else:
             rec_scale = current_scale
-            scale_note = 'Current arc_angular_scale (0.85) works well'
+            scale_note = f'Current arc_angular_scale ({current_scale}) works well'
 
         self.best['arc_angular_scale'] = rec_scale
 
@@ -515,7 +518,7 @@ class TuningNode(Node):
 ''')
         input('    Press ENTER to test very low speeds...\n')
 
-        test_speeds = [0.02, 0.03, 0.04]
+        test_speeds = [0.03, 0.04, 0.05]
         results = []
 
         for spd in test_speeds:
@@ -532,9 +535,21 @@ class TuningNode(Node):
             if moved:
                 print(f'       ✓ Duty cycling working — robot moved at sub-minimum speed!')
             else:
-                print(f'       ✗ No movement — try increasing duty_cycle_period (6, 8)')
+                print(f'       ✗ No movement — try increasing duty_cycle_period (8, 10)')
 
         moved_count = sum(1 for _, _, _, m in results if m)
+
+        if moved_count >= 2:
+            rec_period = 6
+            period_note = 'Duty cycling works well at period=6'
+        elif moved_count == 1:
+            rec_period = 8
+            period_note = 'Only 1 test passed → increase duty_cycle_period to 8'
+        else:
+            rec_period = 10
+            period_note = 'Duty cycling failed → increase duty_cycle_period to 10'
+
+        self.best['duty_cycle_period'] = rec_period
 
         self._box([
             'CHAPTER 5 RESULTS',
@@ -547,12 +562,16 @@ class TuningNode(Node):
             f'{moved_count}/{len(results)} low-speed tests showed movement',
             '',
             'Current duty cycling settings:',
-            '  duty_cycle_enabled = True',
-            '  duty_cycle_period  = 4  (4 cycles × 50ms = 200ms per period)',
+            f'  duty_cycle_enabled = True',
+            f'  duty_cycle_period  = 6  (6 cycles × 50ms = 300ms per period)',
+            '',
+            f'{period_note}',
+            '',
+            '>>> BEST VALUE TO NOTE:',
+            f'    duty_cycle_period = {rec_period}',
             '',
             'If all tests showed movement → settings are fine',
-            'If some failed → increase duty_cycle_period to 6 or 8',
-            '  (longer period = more time at min_pwm = more average torque)',
+            'If some failed → increase duty_cycle_period (more ON time per burst)',
         ])
 
     # ====================================================================
@@ -632,11 +651,11 @@ class TuningNode(Node):
         self._hdr(7, 'FINAL SUMMARY — Your best values & exactly where to edit')
 
         b = self.best
-        min_pwm = b.get('min_pwm', 45)
-        rot_pwm = b.get('rotation_pwm', 70)
-        rot_soft = b.get('rotation_soft_start_steps', 5)
-        lin_min = b.get('linear_min_speed', 0.04)
-        arc_scale = b.get('arc_angular_scale', 0.85)
+        min_pwm = b.get('min_pwm', 57)
+        rot_pwm = b.get('rotation_pwm', 85)
+        rot_soft = b.get('rotation_soft_start_steps', 8)
+        lin_min = b.get('linear_min_speed', 0.10)
+        arc_scale = b.get('arc_angular_scale', 0.95)
 
         print(f'''
     ╔══════════════════════════════════════════════════════════════════╗
@@ -654,7 +673,7 @@ class TuningNode(Node):
     ║  linear_ramp_rate           = 35    (keep unless jerky)        ║
     ║  arc_ramp_rate              = 30    (keep unless wobbling)     ║
     ║  duty_cycle_enabled         = True  (keep for low-speed ctrl)  ║
-    ║  duty_cycle_period          = 4     (keep unless jerky pulses) ║
+    ║  duty_cycle_period          = 6     (keep unless jerky pulses) ║
     ║                                                                ║
     ╚══════════════════════════════════════════════════════════════════╝
 
@@ -671,21 +690,21 @@ class TuningNode(Node):
                                                     ^^
                  Change 45 → {min_pwm}
 
-      Line ~92:  self.declare_parameter('rotation_pwm', 70)
+      Line ~92:  self.declare_parameter('rotation_pwm', 85)
                                                         ^^
-                 Change 70 → {rot_pwm}
+                 Change 85 → {rot_pwm}
 
-      Line ~101: self.declare_parameter('rotation_soft_start_steps', 5)
+      Line ~101: self.declare_parameter('rotation_soft_start_steps', 8)
                                                                      ^
-                 Change 5 → {rot_soft}
+                 Change 8 → {rot_soft}
 
-      Line ~125: self.declare_parameter('linear_min_speed', 0.04)
+      Line ~125: self.declare_parameter('linear_min_speed', 0.10)
                                                             ^^^^
-                 Change 0.04 → {lin_min}
+                 Change 0.10 → {lin_min}
 
-      Line ~140: self.declare_parameter('arc_angular_scale', 0.85)
+      Line ~140: self.declare_parameter('arc_angular_scale', 0.95)
                                                              ^^^^
-                 Change 0.85 → {arc_scale:.2f}
+                 Change 0.95 → {arc_scale:.2f}
 
     ── FILE 2: firmware/motor_controller/motor_controller.ino ──────
 
@@ -841,7 +860,7 @@ class TuningNode(Node):
     │    4. Select the correct USB port                                │
     │    5. Click Upload                                               │
     │    ⚠ You MUST upload the Arduino sketch if you switch branches!  │
-    │      final-2 uses MIN_PWM=45 (different from final-1's 40)      │
+    │      final-2 uses MIN_PWM=57 (tuned from dead zone tests)        │
     └──────────────────────────────────────────────────────────────────┘
 
     ┌──────────────────────────────────────────────────────────────────┐
@@ -882,21 +901,21 @@ class TuningNode(Node):
     │                                                                  │
     │  FILE 1 (MANDATORY): scripts/diff_drive_node.py                  │
     │    Lines to edit (change the number after the comma):            │
-    │      Line ~72:  min_pwm .................. default: 45           │
+    │      Line ~72:  min_pwm .................. default: 57           │
     │      Line ~80:  angular_deadband ......... default: 0.03         │
     │      Line ~86:  linear_deadband .......... default: 0.005        │
-    │      Line ~92:  rotation_pwm ............. default: 70           │
-    │      Line ~101: rotation_soft_start_steps  default: 5            │
+    │      Line ~92:  rotation_pwm ............. default: 85           │
+    │      Line ~101: rotation_soft_start_steps  default: 8            │
     │      Line ~109: rotation_max_duration .... default: 8.0          │
     │      Line ~117: linear_ramp_rate ......... default: 35           │
-    │      Line ~125: linear_min_speed ......... default: 0.04         │
+    │      Line ~125: linear_min_speed ......... default: 0.10         │
     │      Line ~133: arc_ramp_rate ............ default: 30           │
-    │      Line ~140: arc_angular_scale ........ default: 0.85         │
+    │      Line ~140: arc_angular_scale ........ default: 0.95         │
     │      Line ~149: duty_cycle_enabled ....... default: True         │
-    │      Line ~155: duty_cycle_period ........ default: 4            │
+    │      Line ~155: duty_cycle_period ........ default: 6            │
     │                                                                  │
     │  FILE 2 (MANDATORY): firmware/motor_controller/motor_controller  │
-    │    Line ~215: #define MIN_PWM  45                                 │
+    │    Line ~215: #define MIN_PWM  57                                 │
     │    ⚠ MUST match min_pwm from File 1!                             │
     │    ⚠ After changing → re-upload to Arduino!                      │
     │                                                                  │
