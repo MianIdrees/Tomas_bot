@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
 """
-tuning_node.py — Interactive Robot Tuning Script (Branch: final-1)
+tuning_node.py — Fully Guided Robot Tuning Script (Branch: final-1)
 
 Approach: Enhanced PID + Adaptive Deadband + PWM Rescaling
 
-This script provides structured tests to tune the robot's motion parameters.
-It sends cmd_vel commands directly to test rotation, linear motion, PWM dead zones,
-and approach behavior — then helps you adjust parameters for optimal performance.
+This script walks you through every step of tuning your robot. During each test:
+  - You see LIVE data showing commanded vs actual speed
+  - The script tells you exactly what to look for
+  - It picks the BEST value automatically from test results
+  - At the end, it tells you EXACTLY which files to edit and what to change
 
-IMPORTANT: Run bringup_hardware.launch.py FIRST, then run this script.
-           This script does NOT replace Nav2 — it helps you find the right parameter
-           values to use in diff_drive_node.py and nav2_params_hardware.yaml.
+IMPORTANT: Run bringup_hardware.launch.py FIRST in a separate terminal.
 
 Usage:
-    ros2 run Tomas_bot tuning_node.py
-
-The script has 6 chapters:
-    1. PWM Dead Zone Detection — Find the minimum PWM that moves your robot
-    2. Linear Motion Tuning — Tune straight-line speed and approach behavior
-    3. Rotation Tuning — Tune in-place rotation (the most critical for your robot)
-    4. Combined Motion — Test curves and arcs
-    5. Anti-Spin Verification — Verify spin protection works
-    6. Full Parameter Summary — Print all recommended values
+    Terminal 1:  ros2 launch Tomas_bot bringup_hardware.launch.py
+    Terminal 2:  ros2 run Tomas_bot tuning_node.py
 """
 
 import math
 import time
-import sys
 
 import rclpy
 from rclpy.node import Node
@@ -35,79 +27,80 @@ from nav_msgs.msg import Odometry
 
 
 class TuningNode(Node):
+
     def __init__(self):
         super().__init__('tuning_node')
-
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(
-            Odometry, '/odom', self.odom_callback, 10
-        )
+            Odometry, '/odom', self._odom_cb, 10)
 
-        # Current robot state from odometry
-        self.current_x = 0.0
-        self.current_y = 0.0
-        self.current_yaw = 0.0
-        self.current_v = 0.0
-        self.current_w = 0.0
-        self.odom_received = False
+        self.x = self.y = self.yaw = 0.0
+        self.odom_v = self.odom_w = 0.0
+        self.odom_ok = False
 
-        # Tuning results storage
-        self.results = {}
+        # Collected best values across all chapters
+        self.best = {}
 
-    def odom_callback(self, msg):
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
+    # ------------------------------------------------------------------ helpers
+    def _odom_cb(self, msg):
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
-        # Extract yaw from quaternion
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
-        self.current_v = msg.twist.twist.linear.x
-        self.current_w = msg.twist.twist.angular.z
-        self.odom_received = True
+        self.yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.odom_v = msg.twist.twist.linear.x
+        self.odom_w = msg.twist.twist.angular.z
+        self.odom_ok = True
 
-    def send_cmd(self, v, w, duration, show_live=True):
-        """Send a cmd_vel command with live telemetry display.
+    def _wait_odom(self, timeout=10.0):
+        t0 = time.time()
+        while not self.odom_ok and time.time() - t0 < timeout:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        return self.odom_ok
 
-        During execution, prints a real-time table every 0.5s showing:
-          Cmd v / Cmd w   = velocity we are COMMANDING
-          Odom v / Odom w = velocity the robot is ACTUALLY moving (from encoders)
-          Dist            = distance traveled from start position
-          ΔYaw            = heading change in degrees
-
-        If 'Odom v' stays at 0.000 while 'Cmd v' > 0 → robot is NOT moving.
-        If 'Odom v' tracks 'Cmd v' closely → motors are responding well.
-        """
+    def _send(self, v, w, duration):
+        """Send cmd_vel and print live telemetry table."""
         msg = Twist()
         msg.linear.x = float(v)
         msg.angular.z = float(w)
 
-        start = time.time()
-        start_x = self.current_x
-        start_y = self.current_y
-        start_yaw = self.current_yaw
+        x0, y0, yaw0 = self.x, self.y, self.yaw
+        t0 = time.time()
         last_print = -1.0
         rate = self.create_rate(20)
 
-        if show_live:
-            print(f'    ┌ LIVE ─────────────────────────────────────────────────────')
-            print(f'    │ {"Time":>5s}  {"Cmd v":>6s} {"Cmd w":>6s}  {"Odom v":>6s} {"Odom w":>6s}  {"Dist":>6s}  {"ΔYaw":>7s}')
+        hdr = (f'    │ {"Time":>5s}  {"Cmd v":>6s} {"Cmd w":>6s} │ '
+               f'{"Odom v":>6s} {"Odom w":>6s} │ {"Dist":>6s}  {"ΔYaw":>7s} │ Status')
+        print(f'    ┌─────────────────────────────────────────────────────────────────────')
+        print(hdr)
+        print(f'    ├─────────────────────────────────────────────────────────────────────')
 
-        while time.time() - start < duration:
+        while time.time() - t0 < duration:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
+            elapsed = time.time() - t0
 
-            elapsed = time.time() - start
-            if show_live and elapsed - last_print >= 0.5:
-                dx = self.current_x - start_x
-                dy = self.current_y - start_y
-                dist = math.sqrt(dx * dx + dy * dy)
-                yaw_deg = math.degrees(self.current_yaw - start_yaw)
-                while yaw_deg > 180: yaw_deg -= 360
-                while yaw_deg < -180: yaw_deg += 360
-                print(f'    │ {elapsed:5.1f}s  {v:6.3f} {w:6.3f}  {self.current_v:6.3f} {self.current_w:6.3f}  {dist:5.3f}m  {yaw_deg:+6.1f}°')
+            if elapsed - last_print >= 0.5:
+                dist = math.hypot(self.x - x0, self.y - y0)
+                dyaw = math.degrees(self.yaw - yaw0)
+                while dyaw >  180: dyaw -= 360
+                while dyaw < -180: dyaw += 360
+                # Status indicator
+                if abs(v) > 0.001 and abs(self.odom_v) < 0.005 and elapsed > 0.8:
+                    st = '⚠ NOT MOVING'
+                elif abs(w) > 0.001 and abs(self.odom_w) < 0.01 and elapsed > 0.8:
+                    st = '⚠ NOT ROTATING'
+                elif abs(v) > 0.001 and abs(self.odom_v) > 0.005:
+                    st = '✓ moving'
+                elif abs(w) > 0.001 and abs(self.odom_w) > 0.01:
+                    st = '✓ rotating'
+                else:
+                    st = ''
+                print(f'    │ {elapsed:5.1f}s  {v:6.3f} {w:6.3f} │ '
+                      f'{self.odom_v:6.3f} {self.odom_w:6.3f} │ '
+                      f'{dist:5.3f}m  {dyaw:+6.1f}° │ {st}')
                 last_print = elapsed
-
             rate.sleep()
 
         # Stop
@@ -117,517 +110,660 @@ class TuningNode(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
             time.sleep(0.05)
 
-        if show_live:
-            print(f'    └ STOPPED ──────────────────────────────────────────────────')
+        # Final measurement
+        dist = math.hypot(self.x - x0, self.y - y0)
+        dyaw = math.degrees(self.yaw - yaw0)
+        while dyaw >  180: dyaw -= 360
+        while dyaw < -180: dyaw += 360
+        print(f'    └── STOPPED ── Final: dist={dist:.3f}m  ΔYaw={dyaw:+.1f}°')
+        return dist, dyaw
 
-    def wait_for_odom(self, timeout=5.0):
-        """Wait until we receive odometry data."""
-        start = time.time()
-        while not self.odom_received and time.time() - start < timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
-        return self.odom_received
+    def _hdr(self, ch, title):
+        print(f'\n{"═" * 72}')
+        print(f'  CHAPTER {ch}: {title}')
+        print(f'{"═" * 72}')
 
-    def get_input(self, prompt, default=None):
-        """Get user input with optional default."""
-        if default is not None:
-            result = input(f'{prompt} [{default}]: ').strip()
-            return result if result else str(default)
-        return input(f'{prompt}: ').strip()
+    def _box(self, lines):
+        w = max(len(l) for l in lines) + 4
+        print(f'\n    ┌{"─" * w}┐')
+        for l in lines:
+            print(f'    │  {l:<{w-2}}│')
+        print(f'    └{"─" * w}┘')
 
-    def print_header(self, chapter, title):
-        print(f'\n{"=" * 70}')
-        print(f'  CHAPTER {chapter}: {title}')
-        print(f'{"=" * 70}\n')
+    # ====================================================================
+    # CHAPTER 1 — PWM Dead Zone
+    # ====================================================================
+    def ch1_deadzone(self):
+        self._hdr(1, 'PWM DEAD ZONE — Find minimum speed that moves the robot')
+        print('''
+    WHAT THIS TEST DOES:
+      The robot will try to move forward at increasing speeds.
+      For each speed, the LIVE table shows if the robot actually moved.
+      We need to find the LOWEST speed where the robot moves reliably.
 
-    def print_param(self, name, value, lower, upper, description):
-        """Print a parameter with its range and description."""
-        print(f'  {name}: {value}')
-        print(f'    Range: [{lower} .. {upper}]')
-        print(f'    Effect: {description}')
-        print()
+    WHAT TO LOOK FOR in the live table:
+      - "⚠ NOT MOVING" in Status column = speed too low, motor dead zone
+      - "✓ moving" in Status column      = motor is responding
+      - "Odom v" column shows actual speed from wheel encoders
+        If Odom v stays 0.000 while Cmd v > 0 → motors are stalled
 
-    # ========================== CHAPTER 1: PWM DEAD ZONE ==========================
+    WHY THIS MATTERS:
+      Your 2.4kg robot needs a minimum PWM to overcome friction.
+      Below this PWM, motors hum but wheels don't turn.
+      We find this threshold so the controller never sends useless commands.
+''')
+        input('    Press ENTER to begin (robot will try small forward movements)...\n')
 
-    def chapter_1_pwm_deadzone(self):
-        self.print_header(1, 'PWM DEAD ZONE DETECTION')
-        print('  This test finds the minimum PWM that actually moves your robot.')
-        print('  The robot will try increasingly higher speeds until it moves.')
-        print('  Watch the robot carefully — note the FIRST speed that causes motion.')
-        print()
-        print('  CURRENT PARAMETERS:')
-        print('    min_pwm (diff_drive_node): 40')
-        print('    MIN_PWM (Arduino firmware): 40')
-        print()
+        test_speeds = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15]
+        results = []
 
-        input('  Press ENTER to start PWM dead zone test (robot will try to move forward)...')
+        for spd in test_speeds:
+            print(f'\n    ── Test: commanding v={spd:.2f} m/s for 1.5 seconds ──')
+            dist, _ = self._send(spd, 0.0, 1.5)
+            time.sleep(0.8)
 
-        # Test increasing linear velocities
-        test_speeds = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20]
-        min_moving_speed = None
+            moved = dist > 0.008
+            pwm_approx = int(spd / 0.391 * 255)
+            results.append((spd, dist, moved, pwm_approx))
 
-        for speed in test_speeds:
-            print(f'\n  Testing v={speed:.2f} m/s for 1.5s...')
-            start_x = self.current_x
-            start_y = self.current_y
-
-            self.send_cmd(speed, 0.0, 1.5)
-            time.sleep(0.5)
-
-            dx = self.current_x - start_x
-            dy = self.current_y - start_y
-            dist = math.sqrt(dx*dx + dy*dy)
-
-            if dist > 0.01:  # Moved more than 1cm
-                print(f'  → MOVED! (distance: {dist:.3f}m)')
-                if min_moving_speed is None:
-                    min_moving_speed = speed
+            if moved:
+                print(f'    ➜ RESULT: MOVED {dist:.3f}m  (this speed ≈ PWM {pwm_approx})')
             else:
-                print(f'  → no movement (distance: {dist:.3f}m)')
+                print(f'    ➜ RESULT: DID NOT MOVE      (this speed ≈ PWM {pwm_approx})')
 
-            time.sleep(1.0)
+        # Pick best value
+        moved_list = [(s, d, p) for s, d, m, p in results if m]
+        not_moved = [(s, d, p) for s, d, m, p in results if not m]
 
-        if min_moving_speed:
-            # Calculate the PWM this corresponds to
-            pwm_per_mps = 255.0 / 0.391
-            raw_pwm = int(min_moving_speed * pwm_per_mps)
-            print(f'\n  RESULT: Minimum moving speed = {min_moving_speed:.2f} m/s (raw PWM ≈ {raw_pwm})')
-            print(f'  RECOMMENDATION:')
-            recommended_min = max(raw_pwm + 5, 40)
-            print(f'    min_pwm = {recommended_min}  (raw_pwm + 5 safety margin)')
-            print(f'    rotation_min_pwm = {recommended_min + 15}  (needs more torque to start rotation)')
-            self.results['min_pwm'] = recommended_min
-            self.results['rotation_min_pwm'] = recommended_min + 15
+        if moved_list:
+            min_speed, _, raw_pwm = moved_list[0]
+            best_min_pwm = max(raw_pwm + 5, 40)
+            best_rot_min = best_min_pwm + 15
         else:
-            print('\n  WARNING: Robot did not move at any test speed!')
-            print('  Check: Arduino connected? Motors powered? Wheels on ground?')
-            self.results['min_pwm'] = 60
-            self.results['rotation_min_pwm'] = 75
+            best_min_pwm = 60
+            best_rot_min = 75
 
-        print()
-        self.print_param('min_pwm', self.results.get('min_pwm', 40),
-                         25, 80,
-                         'Minimum PWM for linear motion. Increase if robot stalls at low speeds. '
-                         'Decrease if robot jerks when starting. Must match Arduino MIN_PWM.')
-        self.print_param('rotation_min_pwm', self.results.get('rotation_min_pwm', 55),
-                         40, 120,
-                         'Minimum PWM for in-place rotation. Higher than min_pwm because starting '
-                         'rotation from standstill needs more torque. Increase if robot fails to rotate.')
+        self.best['min_pwm'] = best_min_pwm
+        self.best['rotation_min_pwm'] = best_rot_min
 
-    # ========================== CHAPTER 2: LINEAR MOTION ==========================
+        self._box([
+            'CHAPTER 1 RESULTS',
+            '',
+            'Speed  │  Distance │ PWM ≈ │ Moved?',
+            '───────┼───────────┼───────┼───────',
+        ] + [
+            f'{s:.2f}   │  {d:.3f}m   │  {p:3d}  │ {"YES ✓" if m else "NO  ✗"}'
+            for s, d, m, p in results
+        ] + [
+            '',
+            f'First speed that moved: {moved_list[0][0]:.2f} m/s (PWM ≈ {moved_list[0][2]})' if moved_list
+            else 'Robot did NOT move at any speed! Check hardware.',
+            '',
+            '>>> BEST VALUES TO NOTE:',
+            f'    min_pwm         = {best_min_pwm}  (dead zone + 5 safety margin)',
+            f'    rotation_min_pwm = {best_rot_min}  (min_pwm + 15 for rotation torque)',
+            '',
+            'WHAT THESE MEAN:',
+            f'  min_pwm: any motor command below PWM {best_min_pwm} is wasted energy.',
+            f'  rotation_min_pwm: rotation from standstill needs even more ({best_rot_min}).',
+        ])
 
-    def chapter_2_linear_motion(self):
-        self.print_header(2, 'LINEAR MOTION TUNING')
-        print('  Tests straight-line motion at different speeds.')
-        print('  Focus on: Does it move smoothly? Does it drift sideways?')
-        print()
+    # ====================================================================
+    # CHAPTER 2 — Linear Motion
+    # ====================================================================
+    def ch2_linear(self):
+        self._hdr(2, 'LINEAR MOTION — Tune straight-line speed & goal approach')
+        print('''
+    WHAT THIS TEST DOES:
+      Sends forward commands at different speeds for 3 seconds each.
+      Measures actual distance vs expected distance.
 
-        input('  Press ENTER to test linear motion...')
+    WHAT TO LOOK FOR in the live table:
+      - "Odom v" should be close to "Cmd v" = good speed tracking
+      - "Dist" should grow steadily = smooth motion
+      - "ΔYaw" should stay near 0° = going straight
 
-        # Test forward motion at different speeds
-        speeds = [0.05, 0.10, 0.15, 0.20]
-        for speed in speeds:
-            print(f'\n  Testing forward at v={speed:.2f} m/s for 3 seconds...')
-            input(f'    Press ENTER to start...')
+    AFTER EACH TEST:
+      - "Speed accuracy" near 100% = motor responds well to this speed
+      - Low accuracy at low speeds = robot stalls → need higher floor speed
 
-            start_x = self.current_x
-            start_y = self.current_y
-            start_yaw = self.current_yaw
+    WHY THIS MATTERS:
+      Nav2 slows down near the goal. If motors stall at low speeds,
+      the robot stops before reaching the goal. We find the minimum
+      speed that still gives good accuracy.
+''')
+        input('    Press ENTER to begin linear tests...\n')
 
-            self.send_cmd(speed, 0.0, 3.0)
+        speeds = [0.04, 0.06, 0.10, 0.15, 0.20]
+        results = []
+
+        for spd in speeds:
+            expected_dist = spd * 3.0
+            print(f'\n    ── Test: v={spd:.2f} m/s for 3s (expected ≈ {expected_dist:.3f}m) ──')
+            input(f'    Press ENTER to run this test...')
+            dist, dyaw = self._send(spd, 0.0, 3.0)
             time.sleep(1.0)
 
-            dx = self.current_x - start_x
-            dy = self.current_y - start_y
-            dist = math.sqrt(dx*dx + dy*dy)
-            yaw_drift = math.degrees(self.current_yaw - start_yaw)
+            accuracy = (dist / expected_dist * 100) if expected_dist > 0 else 0
+            error_m = expected_dist - dist
+            results.append((spd, dist, expected_dist, accuracy, error_m, dyaw))
 
-            expected = speed * 3.0
-            print(f'    Distance traveled: {dist:.3f}m (expected ~{expected:.3f}m)')
-            print(f'    Heading drift: {yaw_drift:.1f}° (ideal: 0°)')
-            print(f'    Speed accuracy: {(dist/expected)*100:.0f}%')
-
-        print(f'\n  LINEAR TUNING PARAMETERS:')
-        print()
-        self.print_param('approach_min_linear_speed', 0.04,
-                         0.02, 0.10,
-                         'Floor for linear velocity commands. When Nav2 slows down near the goal, '
-                         'this prevents the speed from dropping below motor dead zone. '
-                         'Increase if robot stalls near goal. Decrease if it overshoots.')
-        self.print_param('linear_deadband', 0.005,
-                         0.001, 0.02,
-                         'Minimum linear velocity to pass through (below this → treated as zero). '
-                         'Very low to ensure even tiny forward commands reach the motors. '
-                         'Increase only if motors vibrate/hum without moving at tiny speeds.')
-        self.print_param('pwm_ramp_rate', 40,
-                         10, 80,
-                         'Max PWM change per control cycle (20Hz). Controls acceleration smoothness. '
-                         'Lower = smoother but sluggish. Higher = responsive but jerky. '
-                         'At 40: takes ~0.3s to reach full speed. At 20: ~0.6s. At 80: ~0.15s.')
-        self.print_param('use_pwm_rescaling', True,
-                         False, True,
-                         'When True: maps entire PWM range above dead zone (smoother speed control). '
-                         'When False: just clamps low PWM to min_pwm (simpler, on/off at low speeds). '
-                         'Rescaling recommended for Nav2 since it sends many small velocity adjustments.')
-
-    # ========================== CHAPTER 3: ROTATION ==========================
-
-    def chapter_3_rotation(self):
-        self.print_header(3, 'ROTATION TUNING (MOST CRITICAL)')
-        print('  This is the key test for your robot. Tests in-place rotation at')
-        print('  different angular velocities. Watch for:')
-        print('    - Does the robot actually rotate?')
-        print('    - Does it over-rotate (spin past target)?')
-        print('    - Does it oscillate (wobble back and forth)?')
-        print()
-
-        input('  Press ENTER to start rotation tests...')
-
-        # Test counterclockwise rotation at different angular velocities
-        angular_speeds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8]
-        for w in angular_speeds:
-            target_deg = 90.0
-            duration = math.radians(target_deg) / w
-
-            print(f'\n  Testing CCW rotation: w={w:.1f} rad/s, target=90°, duration={duration:.1f}s')
-            input(f'    Press ENTER to start...')
-
-            start_yaw = self.current_yaw
-
-            self.send_cmd(0.0, w, duration)
-            time.sleep(1.0)
-
-            actual_deg = math.degrees(self.current_yaw - start_yaw)
-            # Normalize to [-180, 180]
-            while actual_deg > 180: actual_deg -= 360
-            while actual_deg < -180: actual_deg += 360
-
-            error = actual_deg - target_deg
-            print(f'    Actual rotation: {actual_deg:.1f}° (target: {target_deg:.0f}°, error: {error:+.1f}°)')
-
-            if abs(actual_deg) < 10:
-                print(f'    ⚠ PROBLEM: Robot barely rotated! Increase rotation_boost_factor or rotation_min_pwm')
-            elif abs(error) > 45:
-                print(f'    ⚠ PROBLEM: Large error! Decrease rotation_boost_factor if over-rotating')
+            print(f'\n    ➜ RESULT for v={spd:.2f}:')
+            print(f'       Expected distance : {expected_dist:.3f}m')
+            print(f'       Actual distance   : {dist:.3f}m')
+            print(f'       Error             : {error_m:+.3f}m')
+            print(f'       Speed accuracy    : {accuracy:.1f}%')
+            print(f'       Heading drift     : {dyaw:+.1f}° (ideal: 0°)')
+            if accuracy > 80:
+                print(f'       ✓ GOOD — this speed works well')
+            elif accuracy > 50:
+                print(f'       ⚠ FAIR — some speed loss, usable')
             else:
-                print(f'    ✓ Acceptable rotation')
+                print(f'       ✗ POOR — robot struggles at this speed')
 
-        # Test clockwise
-        print(f'\n  Testing CW rotation: w=-0.5 rad/s, target=-90°, duration=3.1s')
-        input(f'    Press ENTER to start...')
-        start_yaw = self.current_yaw
-        self.send_cmd(0.0, -0.5, 3.14)
-        time.sleep(1.0)
-        actual_deg = math.degrees(self.current_yaw - start_yaw)
-        while actual_deg > 180: actual_deg -= 360
-        while actual_deg < -180: actual_deg += 360
-        print(f'    Actual rotation: {actual_deg:.1f}° (target: -90°)')
+        # Find the minimum speed with >70% accuracy → approach_min_linear_speed
+        good_speeds = [s for s, d, e, a, em, y in results if a > 70]
+        best_approach = good_speeds[0] if good_speeds else 0.06
+        self.best['approach_min_linear_speed'] = best_approach
 
-        print(f'\n  ROTATION TUNING PARAMETERS:')
-        print()
-        self.print_param('rotation_boost_factor', 1.35,
-                         1.0, 2.0,
-                         'Multiplier applied to PWM during pure in-place rotation (no linear velocity). '
-                         'A 2.4kg robot needs extra torque to overcome friction when spinning in place. '
-                         'At 1.0: no boost. At 1.35: 35% more PWM. At 2.0: double PWM. '
-                         'If robot doesn\'t rotate on sharp turns → increase (try 1.5, 1.7). '
-                         'If robot over-rotates or spins → decrease (try 1.1, 1.2).')
-        self.print_param('rotation_min_pwm', 55,
-                         40, 120,
-                         'Absolute minimum PWM for rotation commands — higher than linear min_pwm. '
-                         'Starting rotation from standstill needs more torque than maintaining motion. '
-                         'If robot doesn\'t start rotating → increase (try 65, 75, 85). '
-                         'If robot jerks violently when starting a turn → decrease. '
-                         'CONSTRAINT: Must be >= min_pwm.')
-        self.print_param('angular_deadband', 0.02,
-                         0.005, 0.10,
-                         'Angular velocity below this threshold is treated as zero (filters jitter). '
-                         'At 0.02 rad/s: very small jitter filtered, most turn commands pass through. '
-                         'If robot twitches constantly → increase to 0.05. '
-                         'If robot ignores turn commands → decrease to 0.01.')
-        self.print_param('max_continuous_rotation_deg', 270,
-                         90, 540,
-                         'Anti-spin limit: max degrees of continuous same-direction rotation. '
-                         'After this, angular velocity is clamped to prevent runaway 360° spins. '
-                         'For normal navigation, 270° covers U-turns with margin. '
-                         'If robot needs full 360° turns → set to 400+. '
-                         'If robot frequently spins out → decrease to 180.')
-        self.print_param('anti_spin_angular_clamp', 0.3,
-                         0.0, 0.5,
-                         'When anti-spin triggers, angular velocity is clamped to this value. '
-                         'At 0.0: rotation stops completely when limit hit (safest). '
-                         'At 0.3: allows gentle turns even after anti-spin triggers. '
-                         'Increase if robot needs to complete > 270° turns without stopping.')
+        self._box([
+            'CHAPTER 2 RESULTS',
+            '',
+            'Speed  │ Expected │ Actual  │ Error    │ Accuracy │ Drift  │ Verdict',
+            '───────┼──────────┼─────────┼──────────┼──────────┼────────┼────────',
+        ] + [
+            f'{s:.2f}   │ {e:.3f}m  │ {d:.3f}m │ {em:+.3f}m  │ {a:5.1f}%  │ {y:+5.1f}° │ '
+            + ('✓ GOOD' if a > 80 else '⚠ FAIR' if a > 50 else '✗ POOR')
+            for s, d, e, a, em, y in results
+        ] + [
+            '',
+            '>>> BEST VALUE TO NOTE:',
+            f'    approach_min_linear_speed = {best_approach}',
+            '',
+            'WHAT THIS MEANS:',
+            f'  The lowest speed where accuracy > 70%. Below {best_approach} m/s,',
+            '  the robot loses too much speed to friction. Nav2 will not',
+            '  be allowed to command speeds below this near the goal.',
+        ])
 
-    # ========================== CHAPTER 4: COMBINED MOTION ==========================
+    # ====================================================================
+    # CHAPTER 3 — Rotation (MOST CRITICAL)
+    # ====================================================================
+    def ch3_rotation(self):
+        self._hdr(3, 'ROTATION — Tune in-place turns (MOST CRITICAL TEST)')
+        print('''
+    WHAT THIS TEST DOES:
+      Commands the robot to rotate exactly 90° at different angular speeds.
+      Measures how much it ACTUALLY rotated.
 
-    def chapter_4_combined_motion(self):
-        self.print_header(4, 'COMBINED MOTION (CURVES)')
-        print('  Tests motion with both linear and angular velocity (arcs/curves).')
-        print('  This simulates what Nav2 commands during path following.')
-        print()
+    WHAT TO LOOK FOR in the live table:
+      - "Odom w" should be non-zero = robot is actually rotating
+      - "ΔYaw" should climb toward +90° = heading is changing
+      - "⚠ NOT ROTATING" = motor can't overcome friction → need more power
 
-        input('  Press ENTER to test arc motion...')
+    AFTER EACH TEST:
+      - Error close to 0° = perfect rotation
+      - Large negative error (e.g. -60°) = UNDER-rotated → need more boost
+      - Large positive error (e.g. +50°) = OVER-rotated → need less boost
 
-        # Test gentle curve
-        print('\n  Test 1: Gentle left curve (v=0.10, w=0.3) for 4s')
+    WHY THIS MATTERS:
+      This is the #1 problem. Nav2 says "turn 90°" but the robot barely
+      moves because 2.4kg is too heavy for the small motors. The
+      rotation_boost_factor multiplies PWM during pure rotation to fix this.
+''')
+        input('    Press ENTER to begin rotation tests...\n')
+
+        angular_speeds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8]
+        results = []
+        target = 90.0
+
+        for w in angular_speeds:
+            duration = math.radians(target) / w
+            print(f'\n    ── Test: rotate CCW at w={w:.1f} rad/s for {duration:.1f}s (target: 90°) ──')
+            input(f'    Press ENTER to run this test...')
+            _, dyaw = self._send(0.0, w, duration)
+            time.sleep(1.0)
+
+            error = dyaw - target
+            error_pct = (error / target) * 100
+            results.append((w, dyaw, error, error_pct))
+
+            print(f'\n    ➜ RESULT for w={w:.1f} rad/s:')
+            print(f'       Target rotation   : +90.0°')
+            print(f'       Actual rotation   : {dyaw:+.1f}°')
+            print(f'       Error             : {error:+.1f}° ({error_pct:+.1f}%)')
+            if abs(dyaw) < 15:
+                print(f'       ✗ FAILED — robot barely rotated!')
+                print(f'         → rotation_boost_factor is too low, or rotation_min_pwm too low')
+            elif abs(error) < 20:
+                print(f'       ✓ GOOD — close to 90° target')
+            elif error > 20:
+                print(f'       ⚠ OVER-ROTATED by {error:.0f}°')
+                print(f'         → decrease rotation_boost_factor')
+            else:
+                print(f'       ⚠ UNDER-ROTATED by {abs(error):.0f}°')
+                print(f'         → increase rotation_boost_factor or rotation_min_pwm')
+
+        # Test clockwise too
+        print(f'\n    ── Test: rotate CW (clockwise) at w=-0.5 rad/s, target: -90° ──')
         input('    Press ENTER...')
-        start_x, start_y = self.current_x, self.current_y
-        self.send_cmd(0.10, 0.3, 4.0)
-        time.sleep(1.0)
-        dist = math.sqrt((self.current_x - start_x)**2 + (self.current_y - start_y)**2)
-        print(f'    Displacement: {dist:.3f}m')
+        _, cw_dyaw = self._send(0.0, -0.5, math.radians(90) / 0.5)
+        cw_error = cw_dyaw - (-90.0)
+        print(f'\n    ➜ CW RESULT: actual={cw_dyaw:+.1f}° target=-90° error={cw_error:+.1f}°')
 
-        # Test sharp curve
-        print('\n  Test 2: Sharp left curve (v=0.05, w=0.6) for 3s')
-        input('    Press ENTER...')
-        start_x, start_y = self.current_x, self.current_y
-        self.send_cmd(0.05, 0.6, 3.0)
-        time.sleep(1.0)
-        dist = math.sqrt((self.current_x - start_x)**2 + (self.current_y - start_y)**2)
-        print(f'    Displacement: {dist:.3f}m')
+        # Automatically recommend boost factor
+        best_w_entry = min(results, key=lambda r: abs(r[2]))
+        best_speed, best_actual = best_w_entry[0], best_w_entry[1]
+        avg_error_pct = sum(r[3] for r in results) / len(results)
+        current_boost = 1.35
 
-        # Test right curve
-        print('\n  Test 3: Gentle right curve (v=0.10, w=-0.3) for 4s')
-        input('    Press ENTER...')
-        self.send_cmd(0.10, -0.3, 4.0)
-        time.sleep(1.0)
+        if avg_error_pct < -30:
+            rec_boost = min(current_boost + 0.2, 2.0)
+            boost_note = 'Robot under-rotates on average → INCREASE boost'
+        elif avg_error_pct > 30:
+            rec_boost = max(current_boost - 0.15, 1.0)
+            boost_note = 'Robot over-rotates on average → DECREASE boost'
+        else:
+            rec_boost = current_boost
+            boost_note = 'Current boost (1.35) is working well — keep it'
 
-        print('\n  If the robot moved smoothly on curves → current settings are good.')
-        print('  If it stuttered or stopped → reduce rotation_boost_factor (only applies to PURE rotation).')
+        self.best['rotation_boost_factor'] = rec_boost
 
-    # ========================== CHAPTER 5: ANTI-SPIN ==========================
+        self._box([
+            'CHAPTER 3 RESULTS',
+            '',
+            'ω (rad/s) │ Target │ Actual  │ Error   │ Error %  │ Verdict',
+            '──────────┼────────┼─────────┼─────────┼──────────┼────────',
+        ] + [
+            f'  {w:.1f}     │ +90.0° │ {a:+6.1f}° │ {e:+6.1f}° │ {ep:+6.1f}% │ '
+            + ('✓ GOOD' if abs(e) < 20 else '✗ UNDER' if e < -20 else '⚠ OVER')
+            for w, a, e, ep in results
+        ] + [
+            '',
+            f'Clockwise test: actual={cw_dyaw:+.1f}° error={cw_error:+.1f}°',
+            '',
+            f'Best angular speed: {best_speed:.1f} rad/s (closest to 90°: {best_actual:+.1f}°)',
+            f'Average error across all speeds: {avg_error_pct:+.1f}%',
+            '',
+            f'{boost_note}',
+            '',
+            '>>> BEST VALUE TO NOTE:',
+            f'    rotation_boost_factor = {rec_boost:.2f}',
+            '',
+            'HOW TO INTERPRET:',
+            '  The boost factor multiplies PWM during pure in-place rotation.',
+            f'  At {rec_boost:.2f}: rotation gets {rec_boost*100-100:.0f}% more PWM than normal.',
+            '  If still under-rotating after change → also increase rotation_min_pwm.',
+        ])
 
-    def chapter_5_anti_spin(self):
-        self.print_header(5, 'ANTI-SPIN VERIFICATION')
-        print('  This test commands continuous rotation to verify anti-spin protection.')
-        print('  The robot should stop (or slow down) after ~270° of rotation.')
-        print()
+    # ====================================================================
+    # CHAPTER 4 — Combined Motion (Arcs)
+    # ====================================================================
+    def ch4_arcs(self):
+        self._hdr(4, 'ARC MOTION — Test curves like Nav2 path following')
+        print('''
+    WHAT THIS TEST DOES:
+      Sends combined forward + turn commands (curves/arcs).
+      This simulates what Nav2 sends during normal path following.
 
-        input('  Press ENTER to test anti-spin (robot will rotate continuously)...')
+    WHAT TO LOOK FOR in the live table:
+      - Both "Odom v" and "Odom w" should be non-zero = moving + turning
+      - "Dist" should increase = robot is actually moving forward
+      - "ΔYaw" should change = robot is also turning
 
-        print('\n  Commanding w=0.5 rad/s for 15 seconds (would be ~430° without protection)...')
-        print('  Watch: robot should slow/stop after ~270° (anti-spin limit)')
+    WHY THIS MATTERS:
+      Nav2 rarely commands pure rotation — mostly it sends arcs.
+      The rotation_boost_factor only applies to PURE rotation (w only).
+      Arcs use normal PWM, so if arcs fail → check min_pwm, not boost.
+''')
+        input('    Press ENTER to begin arc tests...\n')
 
-        start_yaw = self.current_yaw
+        arcs = [
+            (0.10,  0.3, 4.0, 'Gentle LEFT curve'),
+            (0.05,  0.6, 3.0, 'Sharp LEFT curve (like a tight corner)'),
+            (0.10, -0.3, 4.0, 'Gentle RIGHT curve'),
+        ]
+
+        for v, w, dur, desc in arcs:
+            print(f'\n    ── Test: {desc} (v={v}, w={w}) for {dur}s ──')
+            input('    Press ENTER...')
+            dist, dyaw = self._send(v, w, dur)
+            time.sleep(1.0)
+            print(f'    ➜ Displacement: {dist:.3f}m, heading change: {dyaw:+.1f}°')
+            if dist < 0.02:
+                print(f'       ✗ Robot barely moved! → increase min_pwm')
+            else:
+                print(f'       ✓ Arc motion working')
+
+        self._box([
+            'CHAPTER 4 NOTE:',
+            '',
+            'If arcs worked smoothly → PWM rescaling is doing its job.',
+            'If robot stalled on sharp curves → the issue is min_pwm (too low),',
+            'NOT rotation_boost_factor (which only helps pure rotation).',
+        ])
+
+    # ====================================================================
+    # CHAPTER 5 — Anti-Spin Verification
+    # ====================================================================
+    def ch5_antispin(self):
+        self._hdr(5, 'ANTI-SPIN — Verify 360° spin protection')
+        print('''
+    WHAT THIS TEST DOES:
+      Commands continuous rotation at 0.5 rad/s for 15 seconds.
+      Without protection, that would be ~430° of rotation.
+      The anti-spin limit (270°) should stop the robot before 360°.
+
+    WHAT TO LOOK FOR:
+      - Robot starts rotating normally (✓ rotating)
+      - Around 200-270°: robot slows or stops
+      - "◀ ANTI-SPIN TRIGGERED" appears = protection is working
+      - Check the diff_drive_node terminal too for log messages
+
+    WHY THIS MATTERS:
+      Without anti-spin, a Nav2 heading error can make the robot
+      spin endlessly (360°+ overshoot). This safety limit prevents that.
+''')
+        input('    Press ENTER to begin anti-spin test...\n')
+
         msg = Twist()
         msg.angular.z = 0.5
-        start = time.time()
+        t0 = time.time()
+        yaw0 = self.yaw
         rate = self.create_rate(20)
-
-        print(f'    ┌ LIVE ─────────────────────────────────────────────────────')
-        print(f'    │ {"Time":>5s}  {"Cmd w":>6s}  {"Odom w":>6s}  {"ΔYaw":>7s}  Status')
         last_print = -1.0
 
-        while time.time() - start < 15.0:
+        print(f'    ┌─────────────────────────────────────────────────────────────')
+        print(f'    │ {"Time":>5s}  {"Cmd w":>6s} │ {"Odom w":>6s} │ {"ΔYaw":>7s} │ Status')
+        print(f'    ├─────────────────────────────────────────────────────────────')
+
+        while time.time() - t0 < 15.0:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
-
-            elapsed = time.time() - start
+            elapsed = time.time() - t0
             if elapsed - last_print >= 1.0:
-                yaw_deg = math.degrees(self.current_yaw - start_yaw)
-                while yaw_deg > 180: yaw_deg -= 360
-                while yaw_deg < -180: yaw_deg += 360
-                status = ''
-                if abs(yaw_deg) > 200:
-                    status = '← approaching anti-spin limit (270°)'
-                if abs(self.current_w) < 0.05 and elapsed > 3.0:
-                    status = '← MOTORS STOPPED (anti-spin triggered!)'
-                print(f'    │ {elapsed:5.1f}s  {0.5:6.3f}  {self.current_w:6.3f}  {yaw_deg:+6.1f}°  {status}')
+                dyaw = math.degrees(self.yaw - yaw0)
+                while dyaw > 180: dyaw -= 360
+                while dyaw < -180: dyaw += 360
+                if abs(self.odom_w) < 0.05 and elapsed > 3.0:
+                    st = '◀ ANTI-SPIN TRIGGERED! Motors stopped.'
+                elif abs(dyaw) > 200:
+                    st = '⚠ approaching 270° limit...'
+                else:
+                    st = '✓ rotating'
+                print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {dyaw:+6.1f}° │ {st}')
                 last_print = elapsed
-
             rate.sleep()
 
-        print(f'    └ STOPPED ──────────────────────────────────────────────────')
-
-        # Stop
         stop = Twist()
         for _ in range(5):
             self.cmd_pub.publish(stop)
             time.sleep(0.05)
+        print(f'    └─────────────────────────────────────────────────────────────')
 
-        print('  Test complete. Check terminal output for anti-spin trigger messages.')
-        print('  If you see "Anti-spin triggered" → protection is working.')
-        print('  If robot kept spinning without limit → check max_continuous_rotation_deg.')
+        self._box([
+            'CHAPTER 5 RESULTS',
+            '',
+            'If you saw "ANTI-SPIN TRIGGERED" → protection works! ✓',
+            'If robot kept spinning non-stop  → check diff_drive_node logs',
+            '',
+            'Current settings:',
+            '  max_continuous_rotation_deg = 270  (how far before stopping)',
+            '  anti_spin_angular_clamp = 0.3      (speed limit after trigger)',
+            '',
+            'When to adjust:',
+            '  Robot needs U-turns (180°) → 270 is fine (has margin)',
+            '  Robot spins past 270° normally → decrease to 180',
+            '  Robot can\'t complete U-turns → increase to 360',
+        ])
 
-    # ========================== CHAPTER 6: SUMMARY ==========================
+    # ====================================================================
+    # CHAPTER 6 — Final Summary + WHERE TO EDIT
+    # ====================================================================
+    def ch6_summary(self):
+        self._hdr(6, 'FINAL SUMMARY — Your best values & exactly where to edit')
 
-    def chapter_6_summary(self):
-        self.print_header(6, 'FULL PARAMETER SUMMARY')
-        print('  Below are ALL tunable parameters with their recommended values,')
-        print('  valid ranges, and effects. Adjust based on your test results above.')
-        print()
+        b = self.best
+        min_pwm = b.get('min_pwm', 40)
+        rot_min = b.get('rotation_min_pwm', 55)
+        boost = b.get('rotation_boost_factor', 1.35)
+        approach = b.get('approach_min_linear_speed', 0.04)
 
-        print('  ─── diff_drive_node.py Parameters ───')
-        print()
-        self.print_param('min_pwm', self.results.get('min_pwm', 40),
-                         25, 80,
-                         'Minimum PWM for linear motion. MUST match Arduino MIN_PWM. '
-                         'Increase → more torque at low speeds (prevents stalling). '
-                         'Decrease → finer low-speed control (risk of stalling).')
-        self.print_param('rotation_min_pwm', self.results.get('rotation_min_pwm', 55),
-                         40, 120,
-                         'Minimum PWM for in-place rotation. Must be >= min_pwm. '
-                         'Increase → robot can rotate from standstill on heavy loads. '
-                         'Decrease → gentler rotation start (risk of not rotating).')
-        self.print_param('rotation_boost_factor', 1.35,
-                         1.0, 2.0,
-                         'PWM multiplier for pure rotation commands. '
-                         'Increase → more rotation torque. Decrease → less overcorrection.')
-        self.print_param('angular_deadband', 0.02,
-                         0.005, 0.10,
-                         'Angular jitter filter threshold (rad/s). '
-                         'Increase → less twitching, but may ignore small turns. '
-                         'Decrease → more responsive to small commands.')
-        self.print_param('linear_deadband', 0.005,
-                         0.001, 0.02,
-                         'Linear jitter filter threshold (m/s). '
-                         'Keep very low to pass Nav2 approach velocities through.')
-        self.print_param('pwm_ramp_rate', 40,
-                         10, 80,
-                         'Max PWM change per 50ms cycle. '
-                         'Lower → smoother (slower response). Higher → snappier (jerkier).')
-        self.print_param('approach_min_linear_speed', 0.04,
-                         0.02, 0.10,
-                         'Minimum linear speed floor. Prevents stalling near goal. '
-                         'Increase → robot reaches goal faster. Decrease → more precise stopping.')
-        self.print_param('max_continuous_rotation_deg', 270,
-                         90, 540,
-                         'Anti-spin limit in degrees. '
-                         'Lower → safer against spins. Higher → allows larger turns.')
-        self.print_param('anti_spin_angular_clamp', 0.3,
-                         0.0, 0.5,
-                         'Clamped angular velocity when anti-spin triggers. '
-                         '0.0 = full stop. 0.3 = gentle rotation allowed.')
-        self.print_param('use_pwm_rescaling', True,
-                         False, True,
-                         'True = smooth rescaled PWM. False = simple min-PWM clamping.')
+        print(f'''
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║              YOUR TUNED VALUES (from tests above)              ║
+    ╠══════════════════════════════════════════════════════════════════╣
+    ║                                                                ║
+    ║  min_pwm                   = {min_pwm:<5}                          ║
+    ║  rotation_min_pwm          = {rot_min:<5}                          ║
+    ║  rotation_boost_factor     = {boost:<5.2f}                          ║
+    ║  approach_min_linear_speed = {approach:<5}                          ║
+    ║  angular_deadband          = 0.02  (keep unless twitching)     ║
+    ║  linear_deadband           = 0.005 (keep unless humming)       ║
+    ║  pwm_ramp_rate             = 40    (keep unless jerky)         ║
+    ║  max_continuous_rotation   = 270   (keep unless spins out)     ║
+    ║  use_pwm_rescaling         = True  (keep for smooth control)   ║
+    ║                                                                ║
+    ╚══════════════════════════════════════════════════════════════════╝
 
-        print('  ─── Arduino Firmware Parameters (motor_controller.ino) ───')
-        print()
-        self.print_param('MIN_PWM', self.results.get('min_pwm', 40),
-                         25, 80,
-                         'MUST match diff_drive_node.py min_pwm. Dead zone compensation in PID. '
-                         'If these don\'t match, the Arduino PID will fight the ROS2 node.')
-        self.print_param('KP', 1.0,
-                         0.5, 3.0,
-                         'Proportional gain. Increase → faster error correction. '
-                         'Too high → oscillation. Too low → sluggish response.')
-        self.print_param('KI', 0.8,
-                         0.0, 2.0,
-                         'Integral gain. Eliminates steady-state error. '
-                         'Increase → better speed tracking. Too high → overshoot/windup.')
-        self.print_param('KD', 0.15,
-                         0.0, 1.0,
-                         'Derivative gain. Dampens overshoot. '
-                         'Increase → less oscillation. Too high → noisy/jerky response.')
-        self.print_param('RAMP_RATE', 10.0,
-                         2.0, 30.0,
-                         'Target ticks/interval ramping rate. '
-                         'Lower → smoother acceleration. Higher → snappier response.')
-        self.print_param('INTEGRAL_LIMIT', 150.0,
-                         50.0, 300.0,
-                         'Max integral accumulation. Prevents windup. '
-                         'Increase → better steady-state. Decrease → less overshoot risk.')
+    ═══════════════════════════════════════════════════════════════════
+    STEP-BY-STEP: WHERE TO PUT THESE VALUES
+    ═══════════════════════════════════════════════════════════════════
 
-        print('  ─── Nav2 Parameters (nav2_params_hardware.yaml) ───')
-        print()
-        self.print_param('rotate_to_heading_angular_vel', 0.6,
-                         0.3, 1.2,
-                         'Angular velocity for in-place rotation commands from Nav2. '
-                         'Lower → gentler turns (may stall). Higher → faster turns (may overshoot).')
-        self.print_param('rotate_to_heading_min_angle', 0.5,
-                         0.2, 1.0,
-                         'Minimum heading error (rad) to trigger in-place rotation. '
-                         'Lower → more frequent rotations. Higher → only big errors trigger rotate.')
-        self.print_param('min_approach_linear_velocity', 0.04,
-                         0.02, 0.10,
-                         'Nav2 minimum approach speed. Works with approach_min_linear_speed. '
-                         'Increase → reaches goal faster. Decrease → more precision but risks stalling.')
-        self.print_param('max_angular_accel', 0.6,
-                         0.3, 1.5,
-                         'Nav2 angular acceleration limit. '
-                         'Lower → gentler rotation start/stop. Higher → snappier.')
-        self.print_param('velocity_smoother.deadband_velocity[2]', 0.02,
-                         0.01, 0.10,
-                         'Angular deadband in velocity smoother. '
-                         'Lower → passes more small commands. Higher → filters more jitter.')
+    ── FILE 1: scripts/diff_drive_node.py ──────────────────────────
 
+    Open the file and find these lines (near the top, around line 63-111).
+    Change ONLY the number after the comma:
+
+      Line ~63:  self.declare_parameter('min_pwm', 40)
+                                                    ^^
+                 Change 40 → {min_pwm}
+
+      Line ~74:  self.declare_parameter('rotation_boost_factor', 1.35)
+                                                                 ^^^^
+                 Change 1.35 → {boost:.2f}
+
+      Line ~81:  self.declare_parameter('rotation_min_pwm', 55)
+                                                            ^^
+                 Change 55 → {rot_min}
+
+      Line ~104: self.declare_parameter('approach_min_linear_speed', 0.04)
+                                                                     ^^^^
+                 Change 0.04 → {approach}
+
+    ── FILE 2: firmware/motor_controller/motor_controller.ino ──────
+
+    Open the file and find this line (around line 215):
+
+      #define MIN_PWM  40
+                       ^^
+      Change 40 → {min_pwm}
+
+      ⚠ CRITICAL: This number MUST be exactly the same as min_pwm above!
+      If they don't match, the Arduino PID will fight the ROS2 controller.
+
+      After changing → re-upload the sketch to Arduino via Arduino IDE.
+
+    ── FILE 3: config/nav2_params_hardware.yaml (OPTIONAL) ─────────
+
+    Only change if rotation tests showed big problems:
+
+      rotate_to_heading_angular_vel: 0.6
+        → If over-rotating in Nav2: decrease to 0.4
+        → If not rotating in Nav2: increase to 0.8
+
+      min_approach_linear_velocity: 0.04
+        → Change to match your approach_min_linear_speed: {approach}
+
+    ═══════════════════════════════════════════════════════════════════
+    AFTER EDITING — How to apply the changes:
+    ═══════════════════════════════════════════════════════════════════
+
+    Step 1: If you changed motor_controller.ino:
+            → Open Arduino IDE → Upload sketch to Arduino Leonardo
+
+    Step 2: Rebuild the ROS2 package:
+            cd ~/robot_ws && colcon build --packages-select Tomas_bot
+
+    Step 3: Source the workspace:
+            source ~/robot_ws/install/setup.bash
+
+    Step 4: Restart the robot:
+            ros2 launch Tomas_bot bringup_hardware.launch.py
+
+    Step 5: Test with Nav2:
+            ros2 launch Tomas_bot navigation_hardware.launch.py map:=<your_map>
+            Set a goal in RViz2 and watch if turns and approach improve.
+
+    Step 6: If still not perfect → run this tuning script again!
+
+    ═══════════════════════════════════════════════════════════════════
+    FULL PARAMETER REFERENCE (all values, ranges, and effects):
+    ═══════════════════════════════════════════════════════════════════
+''')
+        params = [
+            ('── scripts/diff_drive_node.py ──', [
+                ('min_pwm', min_pwm, 25, 80,
+                 'Motor dead zone threshold. Below this PWM, wheels don\'t turn.\n'
+                 '          MUST match Arduino MIN_PWM. Increase if robot stalls.'),
+                ('rotation_min_pwm', rot_min, 40, 120,
+                 'Minimum PWM for in-place rotation. Higher than min_pwm because\n'
+                 '          starting rotation from standstill needs extra torque.'),
+                ('rotation_boost_factor', boost, 1.0, 2.0,
+                 'Multiplier on PWM during pure rotation (no forward speed).\n'
+                 '          1.35 = 35% more power for turns. Increase if under-rotating.'),
+                ('approach_min_linear_speed', approach, 0.02, 0.10,
+                 'Speed floor near goal. Prevents motor stall during final approach.\n'
+                 '          Increase if robot stalls near goal. Decrease if it overshoots.'),
+                ('angular_deadband', 0.02, 0.005, 0.10,
+                 'Angular commands below this → treated as zero. Filters jitter.\n'
+                 '          Increase if robot twitches constantly. Decrease if ignoring turns.'),
+                ('linear_deadband', 0.005, 0.001, 0.02,
+                 'Linear commands below this → treated as zero. Keep very low.'),
+                ('pwm_ramp_rate', 40, 10, 80,
+                 'Max PWM change per cycle (20Hz). Lower = smoother, higher = snappier.\n'
+                 '          At 40: reaches full speed in ~0.3s. At 20: ~0.6s.'),
+                ('max_continuous_rotation_deg', 270, 90, 540,
+                 'Anti-spin: max degrees of same-direction rotation before clamping.\n'
+                 '          Covers 270° which handles U-turns (180°) with margin.'),
+                ('anti_spin_angular_clamp', 0.3, 0.0, 0.5,
+                 'Clamped angular speed when anti-spin triggers.\n'
+                 '          0.0 = full stop. 0.3 = allows gentle continued rotation.'),
+                ('use_pwm_rescaling', True, False, True,
+                 'Remap PWM range above dead zone for smoother speed control.\n'
+                 '          True = smooth. False = simple min-PWM clamping.'),
+            ]),
+            ('── firmware/motor_controller.ino ──', [
+                ('MIN_PWM', min_pwm, 25, 80,
+                 'MUST match diff_drive_node.py min_pwm exactly!'),
+                ('KP', 1.0, 0.5, 3.0,
+                 'PID proportional gain. Higher = faster correction, risk of oscillation.'),
+                ('KI', 0.8, 0.0, 2.0,
+                 'PID integral gain. Higher = better steady-state tracking.'),
+                ('KD', 0.15, 0.0, 1.0,
+                 'PID derivative gain. Higher = less oscillation, risk of noise.'),
+                ('RAMP_RATE', 10.0, 2.0, 30.0,
+                 'Arduino-side target ramping speed.'),
+            ]),
+            ('── config/nav2_params_hardware.yaml ──', [
+                ('rotate_to_heading_angular_vel', 0.6, 0.3, 1.2,
+                 'How fast Nav2 commands rotation. Lower = gentler, higher = faster.'),
+                ('min_approach_linear_velocity', approach, 0.02, 0.10,
+                 'Nav2 approach speed. Should match approach_min_linear_speed.'),
+                ('max_angular_accel', 0.6, 0.3, 1.5,
+                 'Angular acceleration limit from Nav2.'),
+            ]),
+        ]
+
+        for section, plist in params:
+            print(f'    {section}\n')
+            for name, val, lo, hi, desc in plist:
+                print(f'      {name}: {val}')
+                print(f'        Range  : [{lo} .. {hi}]')
+                print(f'        Effect : {desc}')
+                print()
+
+    # ====================================================================
+    # Main menu
+    # ====================================================================
     def run(self):
-        """Main interactive tuning session."""
         print()
         print('╔══════════════════════════════════════════════════════════════════════╗')
         print('║        TOMAS_BOT TUNING SCRIPT — Branch: final-1                   ║')
         print('║        Enhanced PID + Adaptive Deadband + PWM Rescaling             ║')
         print('╚══════════════════════════════════════════════════════════════════════╝')
-        print()
-        print('  This script helps you tune the robot for smooth autonomous navigation.')
-        print('  It runs interactive tests and shows LIVE sensor data so you can see')
-        print('  exactly what the robot is doing in real-time.')
-        print()
-        print('  HOW IT WORKS:')
-        print('    1. Pick a chapter from the menu (or run all in order)')
-        print('    2. Each chapter has multiple tests — press ENTER to start each one')
-        print('    3. During each test, a LIVE table updates every 0.5s showing:')
-        print('         Cmd v/w  = velocity we are COMMANDING the robot')
-        print('         Odom v/w = velocity robot is ACTUALLY moving (from encoders)')
-        print('         Dist     = how far the robot has traveled')
-        print('         ΔYaw     = heading change in degrees')
-        print('    4. KEY: If "Odom v" stays at 0.000 while "Cmd v" > 0 → NOT moving!')
-        print('    5. After each test, results are shown automatically')
-        print('    6. After all tests, a summary shows recommended parameter values')
-        print('    7. You then update values in diff_drive_node.py / nav2_params.yaml')
-        print()
-        print('  Prerequisites:')
-        print('    1. Robot hardware powered on')
-        print('    2. ros2 launch Tomas_bot bringup_hardware.launch.py running')
-        print('    3. Robot on the ground with space to move (~2m around it)')
-        print()
+        print('''
+    ═══════════════════════════════════════════════════════════════════
+    HOW THIS SCRIPT WORKS (read this first!)
+    ═══════════════════════════════════════════════════════════════════
 
-        if not self.wait_for_odom(timeout=10.0):
-            print('  ERROR: No odometry data received after 10 seconds!')
-            print('  Make sure bringup_hardware.launch.py is running.')
+    SETUP:
+      Terminal 1: ros2 launch Tomas_bot bringup_hardware.launch.py
+      Terminal 2: ros2 run Tomas_bot tuning_node.py  (this script)
+
+    WHAT HAPPENS:
+      1. You pick a chapter from the menu (or "a" for all)
+      2. Each chapter has multiple tests — press ENTER to start each one
+      3. The robot moves automatically while you watch the LIVE TABLE:
+
+         │ Time  Cmd v  Cmd w │ Odom v Odom w │  Dist    ΔYaw │ Status
+         │  0.5s 0.100  0.000 │ 0.092  0.003  │ 0.045m  +0.2° │ ✓ moving
+         │  1.0s 0.100  0.000 │ 0.000  0.000  │ 0.045m  +0.2° │ ⚠ NOT MOVING
+
+         Cmd v/w  = what we are TELLING the robot to do
+         Odom v/w = what the robot is ACTUALLY doing (encoder feedback)
+         Dist     = total distance traveled from start of this test
+         ΔYaw     = heading change in degrees from start of this test
+         Status   = instant verdict: ✓ working or ⚠ problem detected
+
+      4. After each test → a RESULT box shows expected vs actual + error %
+      5. After all tests → script picks the BEST VALUE automatically
+      6. Chapter 6 → shows EXACTLY which files to open and what to change
+
+    YOU DON'T NEED TO CALCULATE ANYTHING — the script does it for you.
+    Just watch the live table, press ENTER between tests, and at the end
+    you get a complete list of values and where to put them.
+''')
+        if not self._wait_odom():
+            print('    ERROR: No odometry! Is bringup_hardware.launch.py running?')
             return
-
-        print('  ✓ Odometry data received. Robot is ready.')
-        print()
+        print('    ✓ Odometry received. Robot is ready.\n')
 
         chapters = [
-            ('1', 'PWM Dead Zone Detection', self.chapter_1_pwm_deadzone),
-            ('2', 'Linear Motion Tuning', self.chapter_2_linear_motion),
-            ('3', 'Rotation Tuning', self.chapter_3_rotation),
-            ('4', 'Combined Motion', self.chapter_4_combined_motion),
-            ('5', 'Anti-Spin Verification', self.chapter_5_anti_spin),
-            ('6', 'Full Parameter Summary', self.chapter_6_summary),
+            ('1', 'PWM Dead Zone Detection', self.ch1_deadzone),
+            ('2', 'Linear Motion Tuning', self.ch2_linear),
+            ('3', 'Rotation Tuning (CRITICAL)', self.ch3_rotation),
+            ('4', 'Arc Motion — Curves', self.ch4_arcs),
+            ('5', 'Anti-Spin Protection Test', self.ch5_antispin),
+            ('6', 'Final Summary + Where to Edit', self.ch6_summary),
         ]
 
         while True:
-            print('\n  Available chapters:')
-            for num, name, _ in chapters:
-                print(f'    {num}. {name}')
-            print('    a. Run ALL chapters in order')
-            print('    q. Quit')
-            print()
+            print('\n    ─── MENU ───')
+            for n, name, _ in chapters:
+                print(f'      {n}. {name}')
+            print('      a. Run ALL chapters in order (recommended first time)')
+            print('      q. Quit & stop motors\n')
 
-            choice = input('  Select chapter (1-6, a, or q): ').strip().lower()
-
+            choice = input('    Select (1-6, a, q): ').strip().lower()
             if choice == 'q':
-                print('\n  Stopping motors and exiting...')
                 stop = Twist()
                 for _ in range(10):
                     self.cmd_pub.publish(stop)
                     time.sleep(0.05)
+                print('\n    Motors stopped. Goodbye!\n')
                 break
             elif choice == 'a':
-                for _, _, func in chapters:
-                    func()
-                    input('\n  Press ENTER to continue to next chapter...')
+                for _, _, fn in chapters:
+                    fn()
+                    if fn != self.ch6_summary:
+                        input('\n    Press ENTER for next chapter...')
             else:
-                for num, _, func in chapters:
-                    if choice == num:
-                        func()
-                        break
+                match = [fn for n, _, fn in chapters if n == choice]
+                if match:
+                    match[0]()
                 else:
-                    print('  Invalid choice.')
+                    print('    Invalid choice.')
 
 
 def main(args=None):
@@ -636,7 +772,6 @@ def main(args=None):
     try:
         node.run()
     except KeyboardInterrupt:
-        # Stop motors on Ctrl+C
         stop = Twist()
         for _ in range(10):
             node.cmd_pub.publish(stop)
