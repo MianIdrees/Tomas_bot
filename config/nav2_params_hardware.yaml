@@ -114,8 +114,8 @@ controller_server:
       min_lookahead_dist: 0.35        # Raised: prevents too-sharp corrections
       max_lookahead_dist: 1.0
       lookahead_time: 2.0             # Longer: more anticipation
-      rotate_to_heading_angular_vel: 0.5   # [SPEED][TURNING] Reduced: state machine handles rotation PWM directly
-      rotate_to_heading_min_angle: 0.4     # [TURNING] ~23° — lower threshold so rotation starts sooner with softer start
+      rotate_to_heading_angular_vel: 0.3   # [SPEED][TURNING] Lower: duty-cycled rotation gives proportional control at 0.3
+      rotate_to_heading_min_angle: 0.8     # [TURNING] ~46° — MUST exceed coast overshoot (~25°) to prevent rotate-overshoot-rotate oscillation
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true   # Scale lookahead with speed for smoother curves
       min_approach_linear_velocity: 0.05   # [SPEED] Higher than branch 1 — state machine duty-cycles below this
@@ -127,7 +127,7 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.07  # Higher: keeps speed above duty-cycle threshold
       allow_reversing: false
-      max_angular_accel: 0.5               # [SPEED][TURNING] Lower: state machine does its own soft-start
+      max_angular_accel: 0.3               # [SPEED][TURNING] Gentler angular acceleration — reduces momentum buildup
       max_robot_pose_search_dist: 10.0
 
 planner_server:
@@ -176,9 +176,9 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.5            # [SPEED] Recovery spin speed — lower to match state machine rotation_pwm
-    min_rotational_vel: 0.25           # [SPEED] Min angular — state machine handles sub-min via duty cycling
-    rotational_acc_lim: 0.6            # [SPEED] Gentle: state machine provides soft-start separately
+    max_rotational_vel: 0.3            # [SPEED] Recovery spin speed — lower for less coast overshoot
+    min_rotational_vel: 0.15           # [SPEED] Min angular — duty cycling handles proportional sub-min speeds
+    rotational_acc_lim: 0.3            # [SPEED] Gentle — reduces angular momentum buildup during recovery spins
 
 waypoint_follower:
   ros__parameters:

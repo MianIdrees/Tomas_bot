@@ -220,10 +220,10 @@ class TuningNode(Node):
       Measures how much it ACTUALLY rotated vs the 90° target.
 
     HOW THE STATE MACHINE HANDLES ROTATION:
-      Unlike final-1 (which multiplies PWM), final-2 uses a FIXED PWM value
-      (rotation_pwm = 65) for all rotations, with a soft-start ramp.
-      The PWM is scaled by angular velocity (floor = min_pwm/rotation_pwm).
-      Soft-start ramps from min_pwm to rotation_pwm (never below dead zone).
+      Uses a soft-start ramp from min_pwm to rotation_pwm, plus magnitude
+      scaling by commanded angular velocity. Sub-min PWM values are duty-cycled
+      (alternating min_pwm and 0) for proportional angular speed control.
+      Lower Nav2 commands → slower rotation → less coast overshoot.
 
     WHAT TO LOOK FOR in the live table:
       - "Odom w" should be non-zero = robot is actually rotating!

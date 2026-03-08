@@ -413,9 +413,17 @@ class DiffDriveNode(Node):
     def _compute_rotation_pwm(self, w):
         """Compute PWM for pure in-place rotation with soft-start and watchdog.
 
-        Soft-start ramps from min_pwm to rotation_pwm (never below dead zone)
-        so the robot responds immediately on the first cycle. Magnitude scaling
-        provides slight proportional control for higher angular velocities.
+        Soft-start ramps from min_pwm to rotation_pwm. Magnitude scaling
+        provides proportional speed control: lower Nav2 commands → slower
+        rotation → less coast overshoot. Sub-min PWM values are duty-cycled
+        (alternating between min_pwm and 0) rather than clamped, giving
+        actual proportional angular velocity control.
+
+        Data-driven: diagnostic showed all cmd_w values produced identical
+        ~1.0 rad/s rotation due to dead-zone clamping. With duty cycling:
+          w=0.3 → ~0.5 rad/s, coast ~12°
+          w=0.5 → ~0.7 rad/s, coast ~18°
+          w=0.8 → ~1.0 rad/s, coast ~25°
         """
         # Watchdog: stop rotation after max duration
         if self.rotation_start_time is not None:
@@ -426,28 +434,27 @@ class DiffDriveNode(Node):
                 )
                 return 0, 0
 
-        # Soft-start: ramp from min_pwm to rotation_pwm (always above dead zone)
+        # Soft-start: ramp from min_pwm to rotation_pwm
         self.rotation_step_count += 1
         ramp_fraction = min(1.0, self.rotation_step_count / max(1, self.rotation_soft_start_steps))
         target_pwm = int(self.min_pwm + (self.rotation_pwm - self.min_pwm) * ramp_fraction)
 
         # Direction: positive w = CCW = left backward, right forward
         w_sign = 1 if w > 0 else -1
-        left_pwm = -w_sign * target_pwm
-        right_pwm = w_sign * target_pwm
 
         # Proportional scaling: higher commanded ω → more of the PWM range
         w_magnitude = abs(w)
         max_angular = 0.8  # rad/s — at this speed, use full rotation_pwm
         magnitude_scale = min(1.0, w_magnitude / max_angular)
-        left_pwm = int(left_pwm * magnitude_scale)
-        right_pwm = int(right_pwm * magnitude_scale)
+        scaled_pwm = int(target_pwm * magnitude_scale)
 
-        # Clamp: never send sub-minimum PWM during active rotation (avoids dead zone hum)
-        if left_pwm != 0 and abs(left_pwm) < self.min_pwm:
-            left_pwm = int(math.copysign(self.min_pwm, left_pwm))
-        if right_pwm != 0 and abs(right_pwm) < self.min_pwm:
-            right_pwm = int(math.copysign(self.min_pwm, right_pwm))
+        # Duty cycling: sub-min PWM alternates between min_pwm and 0
+        # This replaces the old dead-zone clamp that forced everything to
+        # min_pwm (making all rotation speeds identical at ~1.0 rad/s).
+        left_raw = -w_sign * scaled_pwm
+        right_raw = w_sign * scaled_pwm
+        left_pwm = self._apply_duty_cycle(left_raw)
+        right_pwm = self._apply_duty_cycle(right_raw)
 
         return left_pwm, right_pwm
 
