@@ -66,17 +66,48 @@ class TuningNode(Node):
         self.current_w = msg.twist.twist.angular.z
         self.odom_received = True
 
-    def send_cmd(self, v, w, duration):
-        """Send a cmd_vel command for a specified duration (seconds)."""
+    def send_cmd(self, v, w, duration, show_live=True):
+        """Send a cmd_vel command with live telemetry display.
+
+        During execution, prints a real-time table every 0.5s showing:
+          Cmd v / Cmd w   = velocity we are COMMANDING
+          Odom v / Odom w = velocity the robot is ACTUALLY moving (from encoders)
+          Dist            = distance traveled from start position
+          ΔYaw            = heading change in degrees
+
+        If 'Odom v' stays at 0.000 while 'Cmd v' > 0 → robot is NOT moving.
+        If 'Odom v' tracks 'Cmd v' closely → motors are responding well.
+        """
         msg = Twist()
         msg.linear.x = float(v)
         msg.angular.z = float(w)
 
         start = time.time()
+        start_x = self.current_x
+        start_y = self.current_y
+        start_yaw = self.current_yaw
+        last_print = -1.0
         rate = self.create_rate(20)
+
+        if show_live:
+            print(f'    ┌ LIVE ─────────────────────────────────────────────────────')
+            print(f'    │ {"Time":>5s}  {"Cmd v":>6s} {"Cmd w":>6s}  {"Odom v":>6s} {"Odom w":>6s}  {"Dist":>6s}  {"ΔYaw":>7s}')
+
         while time.time() - start < duration:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
+
+            elapsed = time.time() - start
+            if show_live and elapsed - last_print >= 0.5:
+                dx = self.current_x - start_x
+                dy = self.current_y - start_y
+                dist = math.sqrt(dx * dx + dy * dy)
+                yaw_deg = math.degrees(self.current_yaw - start_yaw)
+                while yaw_deg > 180: yaw_deg -= 360
+                while yaw_deg < -180: yaw_deg += 360
+                print(f'    │ {elapsed:5.1f}s  {v:6.3f} {w:6.3f}  {self.current_v:6.3f} {self.current_w:6.3f}  {dist:5.3f}m  {yaw_deg:+6.1f}°')
+                last_print = elapsed
+
             rate.sleep()
 
         # Stop
@@ -85,6 +116,9 @@ class TuningNode(Node):
             self.cmd_pub.publish(stop)
             rclpy.spin_once(self, timeout_sec=0.01)
             time.sleep(0.05)
+
+        if show_live:
+            print(f'    └ STOPPED ──────────────────────────────────────────────────')
 
     def wait_for_odom(self, timeout=5.0):
         """Wait until we receive odometry data."""
@@ -132,7 +166,7 @@ class TuningNode(Node):
         min_moving_speed = None
 
         for speed in test_speeds:
-            print(f'  Testing v={speed:.2f} m/s ... ', end='', flush=True)
+            print(f'\n  Testing v={speed:.2f} m/s for 1.5s...')
             start_x = self.current_x
             start_y = self.current_y
 
@@ -144,11 +178,11 @@ class TuningNode(Node):
             dist = math.sqrt(dx*dx + dy*dy)
 
             if dist > 0.01:  # Moved more than 1cm
-                print(f'MOVED! (distance: {dist:.3f}m)')
+                print(f'  → MOVED! (distance: {dist:.3f}m)')
                 if min_moving_speed is None:
                     min_moving_speed = speed
             else:
-                print(f'no movement (distance: {dist:.3f}m)')
+                print(f'  → no movement (distance: {dist:.3f}m)')
 
             time.sleep(1.0)
 
@@ -380,19 +414,30 @@ class TuningNode(Node):
         start = time.time()
         rate = self.create_rate(20)
 
+        print(f'    ┌ LIVE ─────────────────────────────────────────────────────')
+        print(f'    │ {"Time":>5s}  {"Cmd w":>6s}  {"Odom w":>6s}  {"ΔYaw":>7s}  Status')
+        last_print = -1.0
+
         while time.time() - start < 15.0:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
 
             elapsed = time.time() - start
-            if int(elapsed * 4) % 4 == 0:  # Print every ~1s
-                current_rotation = math.degrees(self.current_yaw - start_yaw)
-                while current_rotation > 180: current_rotation -= 360
-                while current_rotation < -180: current_rotation += 360
-                # This is instantaneous yaw, accumulated rotation is tracked internally
-                pass
+            if elapsed - last_print >= 1.0:
+                yaw_deg = math.degrees(self.current_yaw - start_yaw)
+                while yaw_deg > 180: yaw_deg -= 360
+                while yaw_deg < -180: yaw_deg += 360
+                status = ''
+                if abs(yaw_deg) > 200:
+                    status = '← approaching anti-spin limit (270°)'
+                if abs(self.current_w) < 0.05 and elapsed > 3.0:
+                    status = '← MOTORS STOPPED (anti-spin triggered!)'
+                print(f'    │ {elapsed:5.1f}s  {0.5:6.3f}  {self.current_w:6.3f}  {yaw_deg:+6.1f}°  {status}')
+                last_print = elapsed
 
             rate.sleep()
+
+        print(f'    └ STOPPED ──────────────────────────────────────────────────')
 
         # Stop
         stop = Twist()
@@ -516,7 +561,21 @@ class TuningNode(Node):
         print('╚══════════════════════════════════════════════════════════════════════╝')
         print()
         print('  This script helps you tune the robot for smooth autonomous navigation.')
-        print('  It will run through 6 chapters of tests and parameter recommendations.')
+        print('  It runs interactive tests and shows LIVE sensor data so you can see')
+        print('  exactly what the robot is doing in real-time.')
+        print()
+        print('  HOW IT WORKS:')
+        print('    1. Pick a chapter from the menu (or run all in order)')
+        print('    2. Each chapter has multiple tests — press ENTER to start each one')
+        print('    3. During each test, a LIVE table updates every 0.5s showing:')
+        print('         Cmd v/w  = velocity we are COMMANDING the robot')
+        print('         Odom v/w = velocity robot is ACTUALLY moving (from encoders)')
+        print('         Dist     = how far the robot has traveled')
+        print('         ΔYaw     = heading change in degrees')
+        print('    4. KEY: If "Odom v" stays at 0.000 while "Cmd v" > 0 → NOT moving!')
+        print('    5. After each test, results are shown automatically')
+        print('    6. After all tests, a summary shows recommended parameter values')
+        print('    7. You then update values in diff_drive_node.py / nav2_params.yaml')
         print()
         print('  Prerequisites:')
         print('    1. Robot hardware powered on')
