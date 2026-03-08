@@ -221,7 +221,7 @@ class TuningNode(Node):
 
     HOW THE STATE MACHINE HANDLES ROTATION:
       Unlike final-1 (which multiplies PWM), final-2 uses a FIXED PWM value
-      (rotation_pwm = 65) for all rotations, with a soft-start ramp.
+      (rotation_pwm = 57) for all rotations, with a soft-start ramp.
       The PWM is scaled by angular velocity (floor = min_pwm/rotation_pwm).
 
     WHAT TO LOOK FOR in the live table:
@@ -278,7 +278,7 @@ class TuningNode(Node):
 
         # Auto-recommend rotation_pwm
         avg_error_pct = sum(r[3] for r in results) / len(results)
-        current_pwm = 65
+        current_pwm = 57
 
         if avg_error_pct < -25:
             rec_pwm = min(current_pwm + 15, 130)
@@ -293,14 +293,14 @@ class TuningNode(Node):
         # Check if soft-start helps
         first_result = results[0]  # lowest speed
         if abs(first_result[1]) < 15 and abs(results[-1][1]) > 60:
-            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 15'
-            rec_soft = 15
+            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 18'
+            rec_soft = 18
         elif any(abs(r[2]) > 30 for r in results):
-            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 15'
-            rec_soft = 15
+            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 18'
+            rec_soft = 18
         else:
-            soft_note = 'Soft-start at 12 steps is working well'
-            rec_soft = 12
+            soft_note = 'Soft-start at 15 steps is working well'
+            rec_soft = 15
 
         self.best['rotation_pwm'] = rec_pwm
         self.best['rotation_soft_start_steps'] = rec_soft
@@ -424,9 +424,9 @@ class TuningNode(Node):
       In the state machine, this activates the ARC state.
 
     HOW ARC STATE WORKS:
-      The ARC state applies arc_angular_scale (1.0) to the angular
+      The ARC state applies arc_angular_scale (0.90) to the angular
       component. This controls steering strength on curves.
-      If arc_angular_scale = 1.0, full angular power is applied.
+      If arc_angular_scale = 0.90, angular power is reduced by 10%.
 
     WHAT TO LOOK FOR:
       - Robot moves smoothly along a curve (not jerky)
@@ -470,7 +470,7 @@ class TuningNode(Node):
         avg_yaw_error = sum(abs(r[6]) for r in arc_results) / len(arc_results)
         avg_signed = sum(r[6] for r in arc_results) / len(arc_results)
 
-        current_scale = 1.0
+        current_scale = 0.90
         if avg_signed > 15:
             rec_scale = max(current_scale - 0.10, 0.5)
             scale_note = 'Over-steering on average → DECREASE arc_angular_scale'
@@ -667,10 +667,10 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 57)
-        rot_pwm = b.get('rotation_pwm', 65)
-        rot_soft = b.get('rotation_soft_start_steps', 12)
+        rot_pwm = b.get('rotation_pwm', 57)
+        rot_soft = b.get('rotation_soft_start_steps', 15)
         lin_min = b.get('linear_min_speed', 0.10)
-        arc_scale = b.get('arc_angular_scale', 1.0)
+        arc_scale = b.get('arc_angular_scale', 0.90)
 
         print(f'''
     ╔══════════════════════════════════════════════════════════════════╗
@@ -924,13 +924,13 @@ class TuningNode(Node):
     │      Line ~72:  min_pwm .................. default: 57           │
     │      Line ~80:  angular_deadband ......... default: 0.03         │
     │      Line ~86:  linear_deadband .......... default: 0.005        │
-    │      Line ~92:  rotation_pwm ............. default: 65           │
-    │      Line ~101: rotation_soft_start_steps  default: 12           │
+    │      Line ~92:  rotation_pwm ............. default: 57           │
+    │      Line ~101: rotation_soft_start_steps  default: 15           │
     │      Line ~109: rotation_max_duration .... default: 6.0          │
     │      Line ~117: linear_ramp_rate ......... default: 35           │
     │      Line ~125: linear_min_speed ......... default: 0.10         │
     │      Line ~133: arc_ramp_rate ............ default: 30           │
-    │      Line ~140: arc_angular_scale ........ default: 1.0          │
+    │      Line ~140: arc_angular_scale ........ default: 0.90         │
     │      Line ~149: duty_cycle_enabled ....... default: True         │
     │      Line ~155: duty_cycle_period ........ default: 6            │
     │                                                                  │

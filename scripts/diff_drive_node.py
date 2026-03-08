@@ -89,20 +89,21 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 65)
+        self.declare_parameter('rotation_pwm', 57)
         # [TUNING] Base PWM for in-place rotation. This is the target PWM after soft-start.
-        # Range: 57 to 130. Tuned down from 85: all rotation tests over-rotated 33-164°.
-        # At 65, the velocity scaling range is 57-65 PWM, reducing angular momentum overshoot.
-        # If robot doesn't rotate at all → increase (try 70, 75, 80).
-        # If robot over-rotates or spins too fast → decrease toward 57 (minimum).
+        # Range: 57 to 130. At 57 = min_pwm → lowest possible rotation speed.
+        # Round 3: still over-rotating at 65 (0.3–0.5 rad/s tests 43–163% over).
+        # At 57, robot gets absolute minimum viable PWM for rotation.
+        # If robot doesn't rotate at all → increase (try 60, 65, 70).
+        # If robot over-rotates or spins too fast → this is already at minimum.
 
-        self.declare_parameter('rotation_soft_start_steps', 12)
+        self.declare_parameter('rotation_soft_start_steps', 15)
         # [TUNING] Number of control cycles (at 20Hz) to ramp up to rotation_pwm.
-        # Range: 1 to 20. Tuned up from 8: reduces momentum overshoot.
-        # At 12 steps and 20Hz → takes 0.60s to reach full rotation PWM.
+        # Range: 1 to 20. Tuned up from 12: further reduces momentum overshoot.
+        # At 15 steps and 20Hz → takes 0.75s to reach full rotation PWM.
         # Higher → gentler start (less jerk, less overshoot). Lower → faster response.
-        # If robot jerks when starting rotation → increase to 15.
-        # If rotation feels sluggish to start → decrease to 8.
+        # If robot jerks when starting rotation → increase to 18.
+        # If rotation feels sluggish to start → decrease to 10.
 
         self.declare_parameter('rotation_max_duration', 6.0)
         # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
@@ -135,12 +136,12 @@ class DiffDriveNode(Node):
         # If robot wobbles on curves → decrease to 20.
         # If curves feel sluggish → increase to 45.
 
-        self.declare_parameter('arc_angular_scale', 1.0)
+        self.declare_parameter('arc_angular_scale', 0.90)
         # [TUNING] Scale factor for angular component during arc motion.
-        # Range: 0.5 to 1.2. Tuned from 0.95: LEFT curves nearly perfect,
-        # RIGHT curve asymmetry handled by motor_trim instead.
-        # If robot over-steers on curves → decrease (try 0.9, 0.85).
-        # If robot under-steers (wide turns) → increase (try 1.05, 1.1).
+        # Range: 0.5 to 1.2. Tuned from 1.0: both left (+19°) and right (−41°)
+        # over-steered in round 3. 0.90 reduces angular component by 10%.
+        # If robot over-steers on curves → decrease (try 0.85, 0.80).
+        # If robot under-steers (wide turns) → increase (try 0.95, 1.0).
 
         # --- Duty cycling for sub-minimum speeds ---
         self.declare_parameter('duty_cycle_enabled', True)
@@ -470,7 +471,9 @@ class DiffDriveNode(Node):
         """Compute PWM for combined linear + angular motion (curve following).
 
         Uses inverse kinematics but scales the angular component to prevent
-        over-steering on curves.
+        over-steering on curves. Motor trim is applied to the linear velocity
+        only (before inverse kinematics) so it compensates straight-line drift
+        without amplifying turn asymmetry.
         """
         # Scale angular component
         w_scaled = w * self.arc_angular_scale
@@ -479,13 +482,19 @@ class DiffDriveNode(Node):
         if abs(v) < self.linear_min_speed:
             v = math.copysign(self.linear_min_speed, v)
 
-        # Inverse kinematics with scaled angular
-        v_left = v - (w_scaled * self.wheel_sep / 2.0)
-        v_right = v + (w_scaled * self.wheel_sep / 2.0)
+        # Apply motor trim to linear velocity only (not angular)
+        # This compensates motor asymmetry in the forward component
+        # without worsening left/right turn asymmetry
+        v_left_base = v * (1.0 - self.motor_trim)
+        v_right_base = v * (1.0 + self.motor_trim)
 
-        # Convert to PWM with motor trim compensation
-        left_pwm = int(v_left * self.pwm_per_mps * (1.0 - self.motor_trim))
-        right_pwm = int(v_right * self.pwm_per_mps * (1.0 + self.motor_trim))
+        # Inverse kinematics: add angular differential to trimmed linear
+        v_left = v_left_base - (w_scaled * self.wheel_sep / 2.0)
+        v_right = v_right_base + (w_scaled * self.wheel_sep / 2.0)
+
+        # Convert to PWM
+        left_pwm = int(v_left * self.pwm_per_mps)
+        right_pwm = int(v_right * self.pwm_per_mps)
 
         # Apply duty cycling for sub-minimum speeds
         left_pwm = self._apply_duty_cycle(left_pwm)
