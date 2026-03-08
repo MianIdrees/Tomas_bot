@@ -38,6 +38,10 @@ class TuningNode(Node):
         self.odom_v = self.odom_w = 0.0
         self.odom_ok = False
 
+        # Cumulative rotation tracking (integrates odom_w to avoid ±180° wrap)
+        self._cumulative_yaw = 0.0
+        self._prev_yaw = None
+
         # Collected best values across all chapters
         self.best = {}
 
@@ -53,6 +57,18 @@ class TuningNode(Node):
         self.odom_w = msg.twist.twist.angular.z
         self.odom_ok = True
 
+        # Cumulative yaw: detect wrap-arounds and integrate continuously.
+        # This avoids the ±180° problem where 360° of rotation shows as 0°.
+        if self._prev_yaw is not None:
+            dy = self.yaw - self._prev_yaw
+            # Unwrap: if jump > pi, it wrapped
+            if dy > math.pi:
+                dy -= 2.0 * math.pi
+            elif dy < -math.pi:
+                dy += 2.0 * math.pi
+            self._cumulative_yaw += dy
+        self._prev_yaw = self.yaw
+
     def _wait_odom(self, timeout=10.0):
         t0 = time.time()
         while not self.odom_ok and time.time() - t0 < timeout:
@@ -60,12 +76,18 @@ class TuningNode(Node):
         return self.odom_ok
 
     def _send(self, v, w, duration):
-        """Send cmd_vel and print live telemetry table."""
+        """Send cmd_vel and print live telemetry table.
+
+        Returns (dist, cumulative_dyaw_degrees).
+        Uses cumulative yaw tracking (unwrapped) so 360°+ rotations
+        are measured correctly instead of wrapping at ±180°.
+        """
         msg = Twist()
         msg.linear.x = float(v)
         msg.angular.z = float(w)
 
-        x0, y0, yaw0 = self.x, self.y, self.yaw
+        x0, y0 = self.x, self.y
+        cum_yaw0 = self._cumulative_yaw
         t0 = time.time()
         last_print = -1.0
         rate = self.create_rate(20)
@@ -83,9 +105,7 @@ class TuningNode(Node):
 
             if elapsed - last_print >= 0.5:
                 dist = math.hypot(self.x - x0, self.y - y0)
-                dyaw = math.degrees(self.yaw - yaw0)
-                while dyaw >  180: dyaw -= 360
-                while dyaw < -180: dyaw += 360
+                dyaw = math.degrees(self._cumulative_yaw - cum_yaw0)
                 # Status indicator
                 if abs(v) > 0.001 and abs(self.odom_v) < 0.005 and elapsed > 0.8:
                     st = '⚠ NOT MOVING'
@@ -99,7 +119,7 @@ class TuningNode(Node):
                     st = ''
                 print(f'    │ {elapsed:5.1f}s  {v:6.3f} {w:6.3f} │ '
                       f'{self.odom_v:6.3f} {self.odom_w:6.3f} │ '
-                      f'{dist:5.3f}m  {dyaw:+6.1f}° │ {st}')
+                      f'{dist:5.3f}m  {dyaw:+7.1f}° │ {st}')
                 last_print = elapsed
             rate.sleep()
 
@@ -110,11 +130,9 @@ class TuningNode(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
             time.sleep(0.05)
 
-        # Final measurement
+        # Final measurement (cumulative — no wrap)
         dist = math.hypot(self.x - x0, self.y - y0)
-        dyaw = math.degrees(self.yaw - yaw0)
-        while dyaw >  180: dyaw -= 360
-        while dyaw < -180: dyaw += 360
+        dyaw = math.degrees(self._cumulative_yaw - cum_yaw0)
         print(f'    └── STOPPED ── Final: dist={dist:.3f}m  ΔYaw={dyaw:+.1f}°')
         return dist, dyaw
 
@@ -294,22 +312,23 @@ class TuningNode(Node):
         print('''
     WHAT THIS TEST DOES:
       Commands the robot to rotate exactly 90° at different angular speeds.
-      Measures how much it ACTUALLY rotated.
+      Measures how much it ACTUALLY rotated (using cumulative tracking — no wrap).
 
     WHAT TO LOOK FOR in the live table:
       - "Odom w" should be non-zero = robot is actually rotating
-      - "ΔYaw" should climb toward +90° = heading is changing
+      - "ΔYaw" should climb steadily toward +90° = heading is changing
       - "⚠ NOT ROTATING" = motor can't overcome friction → need more power
+      - If ΔYaw flies past 90° (e.g. +300°, +500°) = MASSIVE OVER-ROTATION
 
     AFTER EACH TEST:
       - Error close to 0° = perfect rotation
-      - Large negative error (e.g. -60°) = UNDER-rotated → need more boost
-      - Large positive error (e.g. +50°) = OVER-rotated → need less boost
+      - Large positive error (e.g. +200°) = OVER-rotated → DECREASE boost
+      - Large negative error (e.g. -40°) = UNDER-rotated → INCREASE boost
 
     WHY THIS MATTERS:
-      This is the #1 problem. Nav2 says "turn 90°" but the robot barely
-      moves because 2.4kg is too heavy for the small motors. The
-      rotation_boost_factor multiplies PWM during pure rotation to fix this.
+      Nav2 says "turn 90°" but the rotation_boost_factor and rotation_min_pwm
+      control how much extra PWM is sent. Too high = runaway spinning.
+      Too low = robot can't turn. We find the sweet spot.
 ''')
         input('    Press ENTER to begin rotation tests...\n')
 
@@ -335,11 +354,12 @@ class TuningNode(Node):
             if abs(dyaw) < 15:
                 print(f'       ✗ FAILED — robot barely rotated!')
                 print(f'         → rotation_boost_factor is too low, or rotation_min_pwm too low')
-            elif abs(error) < 20:
+            elif abs(error) < 25:
                 print(f'       ✓ GOOD — close to 90° target')
-            elif error > 20:
-                print(f'       ⚠ OVER-ROTATED by {error:.0f}°')
-                print(f'         → decrease rotation_boost_factor')
+            elif error > 25:
+                print(f'       ⚠ OVER-ROTATED by {error:.0f}° (spun {dyaw:.0f}° instead of 90°)')
+                print(f'         → decrease rotation_boost_factor (closer to 1.0)')
+                print(f'         → decrease rotation_min_pwm (closer to min_pwm)')
             else:
                 print(f'       ⚠ UNDER-ROTATED by {abs(error):.0f}°')
                 print(f'         → increase rotation_boost_factor or rotation_min_pwm')
@@ -355,19 +375,37 @@ class TuningNode(Node):
         best_w_entry = min(results, key=lambda r: abs(r[2]))
         best_speed, best_actual = best_w_entry[0], best_w_entry[1]
         avg_error_pct = sum(r[3] for r in results) / len(results)
-        current_boost = 1.35
+        current_boost = 1.0  # updated default
 
-        if avg_error_pct < -30:
-            rec_boost = min(current_boost + 0.2, 2.0)
-            boost_note = 'Robot under-rotates on average → INCREASE boost'
-        elif avg_error_pct > 30:
-            rec_boost = max(current_boost - 0.15, 1.0)
-            boost_note = 'Robot over-rotates on average → DECREASE boost'
+        # Calculate how aggressive the recommendation should be
+        # based on how far off the rotation is
+        if avg_error_pct > 200:
+            rec_boost = 1.0
+            rec_min_pwm = 40
+            boost_note = 'Robot MASSIVELY over-rotates → boost=1.0, rotation_min_pwm=min_pwm'
+        elif avg_error_pct > 50:
+            rec_boost = 1.0
+            rec_min_pwm = 40
+            boost_note = 'Robot over-rotates → boost=1.0, rotation_min_pwm=min_pwm'
+        elif avg_error_pct > 20:
+            rec_boost = 1.0
+            rec_min_pwm = 40
+            boost_note = 'Robot slightly over-rotates → boost=1.0'
+        elif avg_error_pct < -50:
+            rec_boost = min(current_boost + 0.3, 1.8)
+            rec_min_pwm = 55
+            boost_note = 'Robot under-rotates significantly → INCREASE boost and rotation_min_pwm'
+        elif avg_error_pct < -20:
+            rec_boost = min(current_boost + 0.15, 1.5)
+            rec_min_pwm = 50
+            boost_note = 'Robot under-rotates → INCREASE boost slightly'
         else:
             rec_boost = current_boost
-            boost_note = 'Current boost (1.35) is working well — keep it'
+            rec_min_pwm = 40
+            boost_note = 'Current settings are working well — keep them'
 
         self.best['rotation_boost_factor'] = rec_boost
+        self.best['rotation_min_pwm'] = rec_min_pwm
 
         self._box([
             'CHAPTER 3 RESULTS',
@@ -376,7 +414,7 @@ class TuningNode(Node):
             '──────────┼────────┼─────────┼─────────┼──────────┼────────',
         ] + [
             f'  {w:.1f}     │ +90.0° │ {a:+6.1f}° │ {e:+6.1f}° │ {ep:+6.1f}% │ '
-            + ('✓ GOOD' if abs(e) < 20 else '✗ UNDER' if e < -20 else '⚠ OVER')
+            + ('✓ GOOD' if abs(e) < 25 else '✗ UNDER' if e < -25 else '⚠ OVER')
             for w, a, e, ep in results
         ] + [
             '',
@@ -387,13 +425,15 @@ class TuningNode(Node):
             '',
             f'{boost_note}',
             '',
-            '>>> BEST VALUE TO NOTE:',
+            '>>> BEST VALUES TO NOTE:',
             f'    rotation_boost_factor = {rec_boost:.2f}',
+            f'    rotation_min_pwm      = {rec_min_pwm}',
             '',
             'HOW TO INTERPRET:',
             '  The boost factor multiplies PWM during pure in-place rotation.',
             f'  At {rec_boost:.2f}: rotation gets {rec_boost*100-100:.0f}% more PWM than normal.',
-            '  If still under-rotating after change → also increase rotation_min_pwm.',
+            f'  rotation_min_pwm = {rec_min_pwm}: minimum PWM sent during pure rotation.',
+            '  If still over-rotating → lower both. If under-rotating → raise both.',
         ])
 
     # ====================================================================
@@ -469,12 +509,12 @@ class TuningNode(Node):
         msg = Twist()
         msg.angular.z = 0.5
         t0 = time.time()
-        yaw0 = self.yaw
+        cum_yaw0 = self._cumulative_yaw
         rate = self.create_rate(20)
         last_print = -1.0
 
         print(f'    ┌─────────────────────────────────────────────────────────────')
-        print(f'    │ {"Time":>5s}  {"Cmd w":>6s} │ {"Odom w":>6s} │ {"ΔYaw":>7s} │ Status')
+        print(f'    │ {"Time":>5s}  {"Cmd w":>6s} │ {"Odom w":>6s} │ {"Total°":>7s} │ Status')
         print(f'    ├─────────────────────────────────────────────────────────────')
 
         while time.time() - t0 < 15.0:
@@ -482,16 +522,14 @@ class TuningNode(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
             elapsed = time.time() - t0
             if elapsed - last_print >= 1.0:
-                dyaw = math.degrees(self.yaw - yaw0)
-                while dyaw > 180: dyaw -= 360
-                while dyaw < -180: dyaw += 360
+                total_deg = math.degrees(self._cumulative_yaw - cum_yaw0)
                 if abs(self.odom_w) < 0.05 and elapsed > 3.0:
                     st = '◀ ANTI-SPIN TRIGGERED! Motors stopped.'
-                elif abs(dyaw) > 200:
+                elif abs(total_deg) > 200:
                     st = '⚠ approaching 270° limit...'
                 else:
                     st = '✓ rotating'
-                print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {dyaw:+6.1f}° │ {st}')
+                print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {total_deg:+7.1f}° │ {st}')
                 last_print = elapsed
             rate.sleep()
 
@@ -525,8 +563,8 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 40)
-        rot_min = b.get('rotation_min_pwm', 55)
-        boost = b.get('rotation_boost_factor', 1.35)
+        rot_min = b.get('rotation_min_pwm', 40)
+        boost = b.get('rotation_boost_factor', 1.0)
         approach = b.get('approach_min_linear_speed', 0.04)
 
         print(f'''
@@ -559,13 +597,13 @@ class TuningNode(Node):
                                                     ^^
                  Change 40 → {min_pwm}
 
-      Line ~74:  self.declare_parameter('rotation_boost_factor', 1.35)
-                                                                 ^^^^
-                 Change 1.35 → {boost:.2f}
+      Line ~74:  self.declare_parameter('rotation_boost_factor', 1.0)
+                                                                 ^^^
+                 Change 1.0 → {boost:.2f}
 
-      Line ~81:  self.declare_parameter('rotation_min_pwm', 55)
+      Line ~81:  self.declare_parameter('rotation_min_pwm', 40)
                                                             ^^
-                 Change 55 → {rot_min}
+                 Change 40 → {rot_min}
 
       Line ~104: self.declare_parameter('approach_min_linear_speed', 0.04)
                                                                      ^^^^
@@ -631,7 +669,7 @@ class TuningNode(Node):
                  '          starting rotation from standstill needs extra torque.'),
                 ('rotation_boost_factor', boost, 1.0, 2.0,
                  'Multiplier on PWM during pure rotation (no forward speed).\n'
-                 '          1.35 = 35% more power for turns. Increase if under-rotating.'),
+                 '          1.0 = no boost. Increase if under-rotating.'),
                 ('approach_min_linear_speed', approach, 0.02, 0.10,
                  'Speed floor near goal. Prevents motor stall during final approach.\n'
                  '          Increase if robot stalls near goal. Decrease if it overshoots.'),
@@ -758,8 +796,8 @@ class TuningNode(Node):
     │      Line ~64:  angular_deadband ............ default: 0.02      │
     │      Line ~65:  linear_deadband ............. default: 0.005     │
     │      Line ~66:  pwm_ramp_rate ............... default: 40        │
-    │      Line ~74:  rotation_boost_factor ....... default: 1.35      │
-    │      Line ~81:  rotation_min_pwm ............ default: 55        │
+    │      Line ~74:  rotation_boost_factor ....... default: 1.0       │
+    │      Line ~81:  rotation_min_pwm ............ default: 40        │
     │      Line ~90:  max_continuous_rotation_deg . default: 270.0     │
     │      Line ~98:  anti_spin_angular_clamp ..... default: 0.3       │
     │      Line ~104: approach_min_linear_speed ... default: 0.04      │

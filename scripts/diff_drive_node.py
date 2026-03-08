@@ -71,20 +71,24 @@ class DiffDriveNode(Node):
         self.declare_parameter('imu_frame', 'imu_link')
 
         # --- NEW: Rotation boost parameters ---
-        self.declare_parameter('rotation_boost_factor', 1.35)
+        self.declare_parameter('rotation_boost_factor', 1.0)
         # [TUNING] Multiplier for PWM during pure in-place rotation (no linear velocity).
         # Heavy robots need extra torque to overcome friction when spinning in place.
-        # Range: 1.0 (no boost) to 2.0 (double PWM). Start at 1.35 for 2.4kg robot.
-        # If robot doesn't rotate at all on sharp turns → increase toward 1.8
+        # Range: 1.0 (no boost) to 2.0 (double PWM).
+        # TUNING RESULT: Robot over-rotates massively at 1.35 (Odom w 3-7x commanded).
+        # Lowered to 1.0 — the min_pwm rescaling already provides enough torque.
+        # If robot doesn't rotate at all on sharp turns → increase toward 1.2
         # If robot over-rotates/spins too much → decrease toward 1.0
 
-        self.declare_parameter('rotation_min_pwm', 55)
+        self.declare_parameter('rotation_min_pwm', 40)
         # [TUNING] Minimum PWM specifically for in-place rotation commands.
         # This is higher than the general min_pwm because starting rotation from
         # standstill on a heavy robot requires more torque than maintaining linear motion.
         # Range: 40 to 100. Must be >= min_pwm. Must be <= 120 or robot may jerk violently.
-        # If robot doesn't start rotating → increase (try 65, 75)
-        # If robot jerks when starting rotation → decrease toward 45
+        # TUNING RESULT: At 55, robot spins at 1.0-1.7 rad/s when only 0.2-0.5 commanded.
+        # Lowered to match min_pwm=40. Boost+rescaling already provides enough torque.
+        # If robot doesn't start rotating → increase (try 50, 55)
+        # If robot over-rotates/spins → keep at 40
 
         # --- NEW: Anti-spin protection ---
         self.declare_parameter('max_continuous_rotation_deg', 270.0)
@@ -162,6 +166,7 @@ class DiffDriveNode(Node):
         self.accumulated_rotation = 0.0      # radians accumulated in same direction
         self.last_angular_sign = 0           # +1, -1, or 0
         self.anti_spin_active = False
+        self.last_odom_angular = 0.0         # actual odom angular velocity for anti-spin
 
         # ========================== SERIAL CONNECTION ==========================
         self.ser = None
@@ -259,12 +264,16 @@ class DiffDriveNode(Node):
             v = 0.0
 
         # --- Layer 2: Anti-spin protection ---
-        # Track accumulated rotation in the same direction. Reset when direction changes.
+        # Track accumulated rotation using ACTUAL odom angular velocity (not commanded).
+        # This is critical because the boosted PWM can make the robot spin 3-7x faster
+        # than the commanded angular velocity. Using commanded w would grossly
+        # underestimate actual rotation and let the robot spin out of control.
+        actual_w = self.last_odom_angular  # from latest odometry callback
         if w != 0.0:
             current_sign = 1 if w > 0 else -1
             if current_sign == self.last_angular_sign:
-                # Same direction: accumulate (dt ~= 1/20Hz = 0.05s)
-                self.accumulated_rotation += abs(w) * (1.0 / self.publish_rate)
+                # Same direction: accumulate using ACTUAL angular velocity
+                self.accumulated_rotation += abs(actual_w) * (1.0 / self.publish_rate)
             else:
                 # Direction changed: reset accumulator
                 self.accumulated_rotation = 0.0
@@ -274,12 +283,12 @@ class DiffDriveNode(Node):
             if self.accumulated_rotation > self.max_continuous_rotation_rad:
                 if not self.anti_spin_active:
                     self.get_logger().warn(
-                        f'Anti-spin triggered: {math.degrees(self.accumulated_rotation):.0f}° accumulated, '
-                        f'clamping w to ±{self.anti_spin_angular_clamp}'
+                        f'Anti-spin triggered: {math.degrees(self.accumulated_rotation):.0f}° accumulated '
+                        f'(actual ω={actual_w:.2f} rad/s), setting w=0'
                     )
                     self.anti_spin_active = True
-                w_sign = 1.0 if w > 0 else -1.0
-                w = w_sign * min(abs(w), self.anti_spin_angular_clamp)
+                # Full stop — clamping to 0.3 still causes overshoot given the massive actual speeds
+                w = 0.0
         else:
             # No angular command: reset accumulator
             self.accumulated_rotation = 0.0
@@ -550,6 +559,9 @@ class DiffDriveNode(Node):
         # Velocities
         self.v_linear = dist_center / dt
         self.v_angular = delta_theta / dt
+
+        # Update actual angular velocity for anti-spin tracking
+        self.last_odom_angular = self.v_angular
 
         # Publish odometry
         self.publish_odometry(now)
