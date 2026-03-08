@@ -561,7 +561,7 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 40)
-        rot_min = b.get('rotation_min_pwm', 40)
+        rot_min = b.get('rotation_min_pwm', 30)
         boost = b.get('rotation_boost_factor', 1.0)
         approach = b.get('approach_min_linear_speed', 0.04)
 
@@ -599,7 +599,7 @@ class TuningNode(Node):
                                                                  ^^^
                  Change 1.0 → {boost:.2f}
 
-      Line ~81:  self.declare_parameter('rotation_min_pwm', 40)
+      Line ~81:  self.declare_parameter('rotation_min_pwm', 30)
                                                             ^^
                  Change 30 → {rot_min}
 
