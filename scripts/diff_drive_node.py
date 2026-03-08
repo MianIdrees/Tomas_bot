@@ -89,28 +89,26 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 85)
+        self.declare_parameter('rotation_pwm', 65)
         # [TUNING] Base PWM for in-place rotation. This is the target PWM after soft-start.
-        # Range: 57 to 130.
-        # This is a fixed PWM for rotation (not velocity-proportional) because at low angular
-        # velocities the proportional PWM falls below dead zone. Instead, we use a fixed PWM
-        # and control rotation duration/duty-cycle.
-        # If robot doesn't rotate at all → increase (try 80, 90, 100).
-        # If robot over-rotates or spins too fast → decrease (try 60, 55).
+        # Range: 57 to 130. Tuned down from 85: all rotation tests over-rotated 33-164°.
+        # At 65, the velocity scaling range is 57-65 PWM, reducing angular momentum overshoot.
+        # If robot doesn't rotate at all → increase (try 70, 75, 80).
+        # If robot over-rotates or spins too fast → decrease toward 57 (minimum).
 
-        self.declare_parameter('rotation_soft_start_steps', 8)
+        self.declare_parameter('rotation_soft_start_steps', 12)
         # [TUNING] Number of control cycles (at 20Hz) to ramp up to rotation_pwm.
-        # Range: 1 to 15.
-        # At 8 steps and 20Hz → takes 0.40s to reach full rotation PWM.
+        # Range: 1 to 20. Tuned up from 8: reduces momentum overshoot.
+        # At 12 steps and 20Hz → takes 0.60s to reach full rotation PWM.
         # Higher → gentler start (less jerk, less overshoot). Lower → faster response.
-        # If robot jerks when starting rotation → increase to 8-10.
-        # If rotation feels sluggish to start → decrease to 2-3.
+        # If robot jerks when starting rotation → increase to 15.
+        # If rotation feels sluggish to start → decrease to 8.
 
-        self.declare_parameter('rotation_max_duration', 8.0)
+        self.declare_parameter('rotation_max_duration', 6.0)
         # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
-        # Range: 2.0 to 15.0 seconds.
-        # At 0.6 rad/s, 8s = ~275° of rotation — enough for U-turns.
-        # If robot needs to do 360° turns → increase to 12.0.
+        # Range: 2.0 to 15.0 seconds. Tuned down from 8.0: robot spins at ~1.0 rad/s
+        # at minimum PWM, so 6s allows ~340° (covers U-turns with safety margin).
+        # If robot needs slow multi-turn → increase to 8.0.
         # If robot spins out of control → decrease to 4.0.
 
         # --- LINEAR state parameters ---
@@ -137,13 +135,12 @@ class DiffDriveNode(Node):
         # If robot wobbles on curves → decrease to 20.
         # If curves feel sluggish → increase to 45.
 
-        self.declare_parameter('arc_angular_scale', 0.95)
+        self.declare_parameter('arc_angular_scale', 1.0)
         # [TUNING] Scale factor for angular component during arc motion.
-        # Range: 0.5 to 1.2.
-        # Reduces angular influence when combined with linear to prevent over-steering.
-        # At 0.95: angular PWM contribution is 95% of calculated value.
-        # If robot over-steers on curves → decrease (try 0.85).
-        # If robot under-steers (wide turns) → increase (try 1.0, 1.05).
+        # Range: 0.5 to 1.2. Tuned from 0.95: LEFT curves nearly perfect,
+        # RIGHT curve asymmetry handled by motor_trim instead.
+        # If robot over-steers on curves → decrease (try 0.9, 0.85).
+        # If robot under-steers (wide turns) → increase (try 1.05, 1.1).
 
         # --- Duty cycling for sub-minimum speeds ---
         self.declare_parameter('duty_cycle_enabled', True)
@@ -157,6 +154,16 @@ class DiffDriveNode(Node):
         # Range: 2 to 10.
         # At 6 and 20Hz: period = 300ms. If target is 50% of min_pwm → 3 cycles ON, 3 OFF.
         # Higher → smoother average but more visible pulsing. Lower → jerkier but faster response.
+
+        # --- Motor asymmetry compensation ---
+        self.declare_parameter('motor_trim', 0.03)
+        # [TUNING] Compensates for left/right motor speed asymmetry.
+        # Range: -0.10 to 0.10.
+        # Positive = reduce left PWM, boost right PWM (fixes rightward drift).
+        # Negative = reduce right PWM, boost left PWM (fixes leftward drift).
+        # Measured: robot drifts right ~3-5°/s during linear motion → left motor runs faster.
+        # If robot drifts RIGHT during straight-line → increase (try 0.04, 0.05).
+        # If robot drifts LEFT → set negative (try -0.02, -0.03).
 
         # Load all parameters
         self.serial_port = self.get_parameter('serial_port').value
@@ -183,6 +190,7 @@ class DiffDriveNode(Node):
         self.arc_angular_scale = self.get_parameter('arc_angular_scale').value
         self.duty_cycle_enabled = self.get_parameter('duty_cycle_enabled').value
         self.duty_cycle_period = self.get_parameter('duty_cycle_period').value
+        self.motor_trim = self.get_parameter('motor_trim').value
 
         # Derived constants
         self.meters_per_tick = (2.0 * math.pi * self.wheel_rad) / self.ticks_per_rev
@@ -444,12 +452,13 @@ class DiffDriveNode(Node):
         if abs(v) < self.linear_min_speed:
             v = math.copysign(self.linear_min_speed, v)
 
-        # Convert to PWM
-        raw_pwm = int(v * self.pwm_per_mps)
+        # Convert to PWM with motor trim compensation
+        left_raw = int(v * self.pwm_per_mps * (1.0 - self.motor_trim))
+        right_raw = int(v * self.pwm_per_mps * (1.0 + self.motor_trim))
 
         # Apply duty cycling for sub-minimum speeds
-        left_pwm = self._apply_duty_cycle(raw_pwm)
-        right_pwm = self._apply_duty_cycle(raw_pwm)
+        left_pwm = self._apply_duty_cycle(left_raw)
+        right_pwm = self._apply_duty_cycle(right_raw)
 
         # Apply ramp
         left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm, self.linear_ramp_rate)
@@ -474,9 +483,9 @@ class DiffDriveNode(Node):
         v_left = v - (w_scaled * self.wheel_sep / 2.0)
         v_right = v + (w_scaled * self.wheel_sep / 2.0)
 
-        # Convert to PWM
-        left_pwm = int(v_left * self.pwm_per_mps)
-        right_pwm = int(v_right * self.pwm_per_mps)
+        # Convert to PWM with motor trim compensation
+        left_pwm = int(v_left * self.pwm_per_mps * (1.0 - self.motor_trim))
+        right_pwm = int(v_right * self.pwm_per_mps * (1.0 + self.motor_trim))
 
         # Apply duty cycling for sub-minimum speeds
         left_pwm = self._apply_duty_cycle(left_pwm)

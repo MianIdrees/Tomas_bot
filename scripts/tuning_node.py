@@ -65,7 +65,9 @@ class TuningNode(Node):
         msg.linear.x = float(v)
         msg.angular.z = float(w)
 
-        x0, y0, yaw0 = self.x, self.y, self.yaw
+        x0, y0 = self.x, self.y
+        last_yaw = self.yaw
+        cumulative_yaw = 0.0  # radians, unwrapped — handles >180° rotation
         t0 = time.time()
         last_print = -1.0
 
@@ -78,13 +80,19 @@ class TuningNode(Node):
         while time.time() - t0 < duration:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
+
+            # Accumulate yaw change (handles wrapping past ±180°)
+            delta = self.yaw - last_yaw
+            if delta > math.pi: delta -= 2 * math.pi
+            if delta < -math.pi: delta += 2 * math.pi
+            cumulative_yaw += delta
+            last_yaw = self.yaw
+
             elapsed = time.time() - t0
 
             if elapsed - last_print >= 0.5:
                 dist = math.hypot(self.x - x0, self.y - y0)
-                dyaw = math.degrees(self.yaw - yaw0)
-                while dyaw >  180: dyaw -= 360
-                while dyaw < -180: dyaw += 360
+                dyaw = math.degrees(cumulative_yaw)
                 if abs(v) > 0.001 and abs(self.odom_v) < 0.005 and elapsed > 0.8:
                     st = '⚠ NOT MOVING'
                 elif abs(w) > 0.001 and abs(self.odom_w) < 0.01 and elapsed > 0.8:
@@ -106,11 +114,14 @@ class TuningNode(Node):
             self.cmd_pub.publish(stop)
             rclpy.spin_once(self, timeout_sec=0.01)
             time.sleep(0.05)
+            delta = self.yaw - last_yaw
+            if delta > math.pi: delta -= 2 * math.pi
+            if delta < -math.pi: delta += 2 * math.pi
+            cumulative_yaw += delta
+            last_yaw = self.yaw
 
         dist = math.hypot(self.x - x0, self.y - y0)
-        dyaw = math.degrees(self.yaw - yaw0)
-        while dyaw >  180: dyaw -= 360
-        while dyaw < -180: dyaw += 360
+        dyaw = math.degrees(cumulative_yaw)
         print(f'    └── STOPPED ── Final: dist={dist:.3f}m  ΔYaw={dyaw:+.1f}°')
         return dist, dyaw
 
@@ -210,7 +221,7 @@ class TuningNode(Node):
 
     HOW THE STATE MACHINE HANDLES ROTATION:
       Unlike final-1 (which multiplies PWM), final-2 uses a FIXED PWM value
-      (rotation_pwm = 85) for all rotations, with a soft-start ramp.
+      (rotation_pwm = 65) for all rotations, with a soft-start ramp.
       The PWM is scaled by angular velocity (floor = min_pwm/rotation_pwm).
 
     WHAT TO LOOK FOR in the live table:
@@ -267,7 +278,7 @@ class TuningNode(Node):
 
         # Auto-recommend rotation_pwm
         avg_error_pct = sum(r[3] for r in results) / len(results)
-        current_pwm = 85
+        current_pwm = 65
 
         if avg_error_pct < -25:
             rec_pwm = min(current_pwm + 15, 130)
@@ -282,14 +293,14 @@ class TuningNode(Node):
         # Check if soft-start helps
         first_result = results[0]  # lowest speed
         if abs(first_result[1]) < 15 and abs(results[-1][1]) > 60:
-            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 10'
-            rec_soft = 10
+            soft_note = 'Low-speed rotation fails but high-speed works → increase rotation_soft_start_steps to 15'
+            rec_soft = 15
         elif any(abs(r[2]) > 30 for r in results):
-            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 10'
-            rec_soft = 10
+            soft_note = 'Some tests over-rotated → try rotation_soft_start_steps = 15'
+            rec_soft = 15
         else:
-            soft_note = 'Soft-start at 8 steps is working well'
-            rec_soft = 8
+            soft_note = 'Soft-start at 12 steps is working well'
+            rec_soft = 12
 
         self.best['rotation_pwm'] = rec_pwm
         self.best['rotation_soft_start_steps'] = rec_soft
@@ -413,9 +424,9 @@ class TuningNode(Node):
       In the state machine, this activates the ARC state.
 
     HOW ARC STATE WORKS:
-      The ARC state applies arc_angular_scale (0.85) to reduce the angular
-      component. This prevents over-steering on curves.
-      If arc_angular_scale = 0.85, angular contribution is only 85%.
+      The ARC state applies arc_angular_scale (1.0) to the angular
+      component. This controls steering strength on curves.
+      If arc_angular_scale = 1.0, full angular power is applied.
 
     WHAT TO LOOK FOR:
       - Robot moves smoothly along a curve (not jerky)
@@ -459,7 +470,7 @@ class TuningNode(Node):
         avg_yaw_error = sum(abs(r[6]) for r in arc_results) / len(arc_results)
         avg_signed = sum(r[6] for r in arc_results) / len(arc_results)
 
-        current_scale = 0.95
+        current_scale = 1.0
         if avg_signed > 15:
             rec_scale = max(current_scale - 0.10, 0.5)
             scale_note = 'Over-steering on average → DECREASE arc_angular_scale'
@@ -582,7 +593,7 @@ class TuningNode(Node):
         print('''
     WHAT THIS TEST DOES:
       Commands continuous rotation at 0.5 rad/s for 10 seconds.
-      The state machine's watchdog (rotation_max_duration = 8.0s)
+      The state machine's watchdog (rotation_max_duration = 6.0s)
       should stop the motors before the full 10 seconds.
 
     WHAT TO LOOK FOR:
@@ -599,7 +610,8 @@ class TuningNode(Node):
         msg = Twist()
         msg.angular.z = 0.5
         t0 = time.time()
-        yaw0 = self.yaw
+        last_yaw = self.yaw
+        cumulative_yaw = 0.0
         last_print = -1.0
 
         print(f'    ┌─────────────────────────────────────────────────────────────')
@@ -609,15 +621,18 @@ class TuningNode(Node):
         while time.time() - t0 < 10.0:
             self.cmd_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.01)
+            delta = self.yaw - last_yaw
+            if delta > math.pi: delta -= 2 * math.pi
+            if delta < -math.pi: delta += 2 * math.pi
+            cumulative_yaw += delta
+            last_yaw = self.yaw
             elapsed = time.time() - t0
             if elapsed - last_print >= 1.0:
-                dyaw = math.degrees(self.yaw - yaw0)
-                while dyaw > 180: dyaw -= 360
-                while dyaw < -180: dyaw += 360
+                dyaw = math.degrees(cumulative_yaw)
                 if abs(self.odom_w) < 0.05 and elapsed > 3.0:
                     st = '◀ WATCHDOG TRIGGERED! Motors stopped.'
-                elif elapsed > 6.0:
-                    st = '⚠ approaching 8s watchdog limit...'
+                elif elapsed > 4.5:
+                    st = '⚠ approaching 6s watchdog limit...'
                 else:
                     st = '✓ rotating'
                 print(f'    │ {elapsed:5.1f}s  {0.5:6.3f} │ {self.odom_w:6.3f} │ {dyaw:+6.1f}° │ {st}')
@@ -636,12 +651,12 @@ class TuningNode(Node):
             'If you saw "WATCHDOG TRIGGERED" → protection works! ✓',
             'If robot kept spinning all 10 seconds → check diff_drive_node logs',
             '',
-            'Current setting: rotation_max_duration = 8.0 seconds',
+            'Current setting: rotation_max_duration = 6.0 seconds',
             '',
             'When to adjust:',
-            '  Robot needs slow U-turns → keep 8.0 or increase to 10.0',
-            '  Robot spins too much → decrease to 5.0 or 6.0',
-            '  At 0.5 rad/s: 8s allows ≈ 230° rotation (covers U-turns)',
+            '  Robot needs slow U-turns → keep 6.0 or increase to 8.0',
+            '  Robot spins too much → decrease to 4.0 or 5.0',
+            '  At 0.5 rad/s: 6s allows ≈ 170° rotation (covers most turns)',
         ])
 
     # ====================================================================
@@ -652,10 +667,10 @@ class TuningNode(Node):
 
         b = self.best
         min_pwm = b.get('min_pwm', 57)
-        rot_pwm = b.get('rotation_pwm', 85)
-        rot_soft = b.get('rotation_soft_start_steps', 8)
+        rot_pwm = b.get('rotation_pwm', 65)
+        rot_soft = b.get('rotation_soft_start_steps', 12)
         lin_min = b.get('linear_min_speed', 0.10)
-        arc_scale = b.get('arc_angular_scale', 0.95)
+        arc_scale = b.get('arc_angular_scale', 1.0)
 
         print(f'''
     ╔══════════════════════════════════════════════════════════════════╗
@@ -667,13 +682,14 @@ class TuningNode(Node):
     ║  rotation_soft_start_steps  = {rot_soft:<5}                         ║
     ║  linear_min_speed           = {lin_min:<5}                         ║
     ║  arc_angular_scale          = {arc_scale:<5.2f}                         ║
-    ║  rotation_max_duration      = 8.0   (keep unless spins out)    ║
+    ║  rotation_max_duration      = 6.0   (keep unless spins out)    ║
     ║  angular_deadband           = 0.03  (keep unless twitching)    ║
     ║  linear_deadband            = 0.005 (keep unless humming)      ║
     ║  linear_ramp_rate           = 35    (keep unless jerky)        ║
     ║  arc_ramp_rate              = 30    (keep unless wobbling)     ║
     ║  duty_cycle_enabled         = True  (keep for low-speed ctrl)  ║
     ║  duty_cycle_period          = 6     (keep unless jerky pulses) ║
+    ║  motor_trim                 = 0.03  (compensates motor drift)  ║
     ║                                                                ║
     ╚══════════════════════════════════════════════════════════════════╝
 
@@ -690,21 +706,21 @@ class TuningNode(Node):
                                                     ^^
                  Change 45 → {min_pwm}
 
-      Line ~92:  self.declare_parameter('rotation_pwm', 85)
+      Line ~92:  self.declare_parameter('rotation_pwm', 65)
                                                         ^^
-                 Change 85 → {rot_pwm}
+                 Change 65 → {rot_pwm}
 
-      Line ~101: self.declare_parameter('rotation_soft_start_steps', 8)
-                                                                     ^
-                 Change 8 → {rot_soft}
+      Line ~101: self.declare_parameter('rotation_soft_start_steps', 12)
+                                                                     ^^
+                 Change 12 → {rot_soft}
 
       Line ~125: self.declare_parameter('linear_min_speed', 0.10)
                                                             ^^^^
                  Change 0.10 → {lin_min}
 
-      Line ~140: self.declare_parameter('arc_angular_scale', 0.95)
-                                                             ^^^^
-                 Change 0.95 → {arc_scale:.2f}
+      Line ~140: self.declare_parameter('arc_angular_scale', 1.0)
+                                                             ^^^
+                 Change 1.0 → {arc_scale:.2f}
 
     ── FILE 2: firmware/motor_controller/motor_controller.ino ──────
 
@@ -775,9 +791,9 @@ class TuningNode(Node):
                  'Number of 50ms cycles to ramp from 0 to rotation_pwm.\n'
                  '          More steps = gentler start = less overshoot.\n'
                  '          At 5 steps: 250ms ramp. At 10: 500ms ramp.'),
-                ('rotation_max_duration', 8.0, 2.0, 15.0,
+                ('rotation_max_duration', 6.0, 2.0, 15.0,
                  'Watchdog: max seconds of continuous rotation before stopping.\n'
-                 '          At 0.5 rad/s and 8s: allows ≈230° rotation.'),
+                 '          At 0.5 rad/s and 6s: allows ≈170° rotation.'),
                 ('linear_ramp_rate', 35, 10, 80,
                  'Max PWM change per cycle in LINEAR state.\n'
                  '          Lower = smoother acceleration. Higher = snappier.'),
@@ -789,15 +805,19 @@ class TuningNode(Node):
                  '          Slower than linear ramp because steering is more sensitive.'),
                 ('arc_angular_scale', arc_scale, 0.5, 1.2,
                  'Scale factor for angular component during ARC state.\n'
-                 '          At 0.85: angular gets 85% power (reduces over-steering).\n'
-                 '          Increase for sharper curves. Decrease for gentler curves.'),
+                 '          At 1.0: full angular power.\n'
+                 '          Decrease for gentler curves. Increase for sharper curves.'),
                 ('duty_cycle_enabled', True, False, True,
                  'Enable duty cycling for sub-minimum speeds.\n'
                  '          True: alternates min_pwm/0 for smooth low-speed control.\n'
                  '          False: clamps to min_pwm (jumpy at low speeds).'),
-                ('duty_cycle_period', 4, 2, 10,
+                ('duty_cycle_period', 6, 2, 10,
                  'Cycles per duty period. At 20Hz: period × 50ms.\n'
                  '          Higher = smoother average. Lower = faster response.'),
+                ('motor_trim', 0.03, -0.10, 0.10,
+                 'Motor asymmetry compensation. Positive = reduce left, boost right.\n'
+                 '          Compensates drift during straight-line driving.\n'
+                 '          Increase if robot drifts right. Decrease (negative) if drifts left.'),
             ]),
             ('── firmware/motor_controller.ino ──', [
                 ('MIN_PWM', min_pwm, 30, 80,
@@ -904,13 +924,13 @@ class TuningNode(Node):
     │      Line ~72:  min_pwm .................. default: 57           │
     │      Line ~80:  angular_deadband ......... default: 0.03         │
     │      Line ~86:  linear_deadband .......... default: 0.005        │
-    │      Line ~92:  rotation_pwm ............. default: 85           │
-    │      Line ~101: rotation_soft_start_steps  default: 8            │
-    │      Line ~109: rotation_max_duration .... default: 8.0          │
+    │      Line ~92:  rotation_pwm ............. default: 65           │
+    │      Line ~101: rotation_soft_start_steps  default: 12           │
+    │      Line ~109: rotation_max_duration .... default: 6.0          │
     │      Line ~117: linear_ramp_rate ......... default: 35           │
     │      Line ~125: linear_min_speed ......... default: 0.10         │
     │      Line ~133: arc_ramp_rate ............ default: 30           │
-    │      Line ~140: arc_angular_scale ........ default: 0.95         │
+    │      Line ~140: arc_angular_scale ........ default: 1.0          │
     │      Line ~149: duty_cycle_enabled ....... default: True         │
     │      Line ~155: duty_cycle_period ........ default: 6            │
     │                                                                  │
