@@ -89,29 +89,26 @@ class DiffDriveNode(Node):
         # Keep very low so Nav2 approach commands pass through.
 
         # --- ROTATION state parameters ---
-        self.declare_parameter('rotation_pwm', 65)
+        self.declare_parameter('rotation_pwm', 60)
         # [TUNING] Base PWM for in-place rotation. Target PWM after soft-start completes.
         # Range: 57 to 130. Set above min_pwm to give soft-start a ramp range.
-        # Soft-start ramps from min_pwm (57) to this value, so robot responds immediately.
-        # At 65: ramp range is 57→65 (small, gentle). Robot physically spins at ~1.0 rad/s
-        # regardless (min rotation speed is hardware-limited). Nav2 handles via closed-loop.
-        # If robot doesn't rotate at all → increase (try 70, 75).
-        # If rotation overshoots in Nav2 → decrease toward 60.
+        # At 60: just 3 above min_pwm (57). Slower rotation → less coast overshoot.
+        # If robot doesn't rotate at all → increase (try 65, 70).
+        # If rotation overshoots in Nav2 → decrease toward 58.
 
-        self.declare_parameter('rotation_soft_start_steps', 5)
-        # [TUNING] Number of control cycles (at 20Hz) to ramp from min_pwm to rotation_pwm.
-        # Range: 1 to 15. Ramp is now min_pwm→rotation_pwm (57→65 = 8 PWM range).
-        # At 5 steps and 20Hz → 250ms ramp. Robot moves from the FIRST cycle.
-        # Higher → gentler acceleration. Lower → faster to full speed.
-        # If rotation jerks at start → increase to 8.
-        # If rotation feels sluggish → decrease to 3.
+        self.declare_parameter('rotation_soft_start_steps', 2)
+        # [TUNING] Number of control cycles to ramp from min_pwm to rotation_pwm.
+        # Range: 1 to 15. At 2 steps: nearly instant start (133ms at 15Hz).
+        # Ramp range is only 57→60 (3 PWM), so soft-start is minimal.
+        # If rotation jerks at start → increase to 4.
+        # If rotation feels sluggish → set to 1.
 
-        self.declare_parameter('rotation_max_duration', 6.0)
+        self.declare_parameter('rotation_max_duration', 10.0)
         # [TUNING] Maximum seconds of continuous rotation before watchdog stops it.
-        # Range: 2.0 to 15.0 seconds. Tuned down from 8.0: robot spins at ~1.0 rad/s
-        # at minimum PWM, so 6s allows ~340° (covers U-turns with safety margin).
-        # If robot needs slow multi-turn → increase to 8.0.
-        # If robot spins out of control → decrease to 4.0.
+        # Range: 2.0 to 15.0 seconds. At 10s: covers full 360° comfortably.
+        # Prevents mid-rotation cutoff that causes pause+restart stuttering.
+        # Nav2's progress checker (20s) is the real stuck-detection.
+        # If robot spins out of control → decrease to 6.0.
 
         # --- LINEAR state parameters ---
         self.declare_parameter('linear_ramp_rate', 35)

@@ -136,7 +136,9 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.07  # Higher: keeps speed above duty-cycle threshold
       allow_reversing: false
-      max_angular_accel: 0.3               # [SPEED][TURNING] Gentler angular acceleration — reduces momentum buildup
+      max_angular_accel: 0.8               # [SPEED][TURNING] Fast angular ramp — robot starts turning within 1 cycle (67ms)
+                                             # instead of 15 cycles (1s) with the old 0.3 value.
+                                             # Motor layer uses fixed PWM so accel doesn't affect physical momentum.
       max_robot_pose_search_dist: 10.0
 
 planner_server:
