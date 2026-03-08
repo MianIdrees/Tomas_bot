@@ -1,6 +1,6 @@
 # Tomas_bot — Daniel's Robot
 
-**Branch: `feature/bno085-imu-ekf-integration`**
+**Branch: `final-1` — Enhanced PID + Adaptive Deadband + PWM Rescaling**
 
 Differential drive mobile robot running ROS2 Jazzy on LattePanda Alpha (Core i5) with built-in Arduino Leonardo. Features autonomous navigation using Nav2, SLAM mapping, RPLidar C1 laser scanning, and **BNO085 9-DOF IMU with Extended Kalman Filter (EKF) sensor fusion** for improved localization.
 
@@ -28,14 +28,34 @@ Differential drive mobile robot running ROS2 Jazzy on LattePanda Alpha (Core i5)
 | IMU Update Rate | 20 Hz |
 | EKF Output Rate | 30 Hz |
 
-## What's New in This Branch
+## What's New in This Branch (final-1)
 
-- **BNO085 IMU Integration** — Arduino reads BNO085 via I²C and sends quaternion + accel + gyro data over serial
-- **Extended Kalman Filter** — `robot_localization` fuses wheel odometry + IMU for dramatically better localization
-- **IMU in URDF** — `imu_link` visible in RViz as a blue rectangle on the chassis
-- **Calibration Script** — Interactive 10-step BNO085 calibration guide
-- **Diagnostic Script** — Real-time IMU health check with live dashboard
-- **Encoder Pin Move** — Left encoder moved D3/D2 → D1/D0 to free I²C bus for IMU
+This branch solves sharp-turn stalling, excessive spinning, and slow goal approach using **Enhanced PID + Adaptive Deadband + PWM Rescaling**:
+
+### Problems Solved
+1. **Robot doesn't rotate on sharp turns** → Rotation boost + higher rotation_min_pwm
+2. **Robot spins excessively (360° runaway)** → Anti-spin protection (270° limit)
+3. **Robot stalls near goal** → Approach speed floor above motor dead zone
+4. **Motors don't move at minimum PWM** → Raised MIN_PWM to 40 + PWM rescaling
+
+### Key Changes from IMU branch
+- **diff_drive_node.py**: Rotation boost, anti-spin, approach floor, PWM rescaling, separate deadbands
+- **motor_controller.ino**: MIN_PWM raised from 25 → 40
+- **nav2_params_hardware.yaml**: Tuned RPP controller, reduced angular velocities, velocity-scaled lookahead
+- **tuning_node.py**: NEW interactive 6-chapter tuning script
+
+### Tuning Script
+```bash
+ros2 run Tomas_bot tuning_node.py
+```
+Chapters: PWM Dead Zone | Linear Motion | Rotation | Combined Motion | Anti-Spin | Parameter Summary
+
+### Previous Branch Features (inherited)
+- BNO085 IMU Integration via I²C
+- Extended Kalman Filter sensor fusion
+- IMU in URDF
+- Calibration & diagnostic scripts
+- Encoder pin move for I²C bus
 
 ## Project Structure
 
@@ -69,9 +89,10 @@ Tomas_bot/
 ├── scripts/
 │   ├── diff_drive_node.py               # ROS2 ↔ Arduino bridge (odom + IMU)
 │   ├── joystick_teleop_node.py          # PS3 gamepad teleop node
-│   ├── imu_calibration_node.py          # BNO085 calibration script (NEW)
-│   └── imu_check_node.py               # IMU health check/diagnostics (NEW)
-├── IMU_GUIDE.md                         # IMU setup, calibration, debugging guide (NEW)
+│   ├── imu_calibration_node.py          # BNO085 calibration script
+│   ├── imu_check_node.py               # IMU health check/diagnostics
+│   └── tuning_node.py                  # Interactive motion tuning script (NEW)
+├── IMU_GUIDE.md                         # IMU setup, calibration, debugging guide
 ├── INSTALLATION_GUIDE.md                # Full setup instructions
 ├── RUNNING_GUIDE.md                     # Operating instructions
 ├── CMakeLists.txt

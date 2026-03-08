@@ -2,6 +2,14 @@
 """
 diff_drive_node.py - ROS2 Serial Bridge for Arduino Leonardo Motor + IMU Controller
 
+BRANCH: final-1 — Enhanced PID + Adaptive Deadband + PWM Rescaling
+
+Approach: Solves sharp-turn stalling, excessive spinning, and slow goal approach by:
+  1. PWM rescaling: Maps velocity→PWM above the motor dead zone so every command moves
+  2. Rotation boost: Extra PWM kick for in-place turns (pure angular, no linear)
+  3. Anti-spin protection: Detects accumulated rotation and clamps angular velocity
+  4. Goal approach floor: Prevents the robot from becoming too slow near the goal
+
 This node bridges ROS2 and the Arduino Leonardo controller on LattePanda Alpha:
   - Subscribes to /cmd_vel (Twist) -> sends PWM commands to Arduino Leonardo
   - Reads encoder ticks from Arduino -> publishes /wheel/odom (Odometry)
@@ -52,15 +60,61 @@ class DiffDriveNode(Node):
         self.declare_parameter('wheel_radius', 0.0345)     # 69mm wheels
         self.declare_parameter('ticks_per_rev', 528.0)     # 11 PPR x 48:1 gear (CALIBRATE)
         self.declare_parameter('max_motor_speed', 0.391)   # [SPEED] Measured: ~48 ticks/50ms × 20Hz × 0.000411 m/tick (raw PWM 255)
-        self.declare_parameter('min_pwm', 25)                # Must match Arduino firmware MIN_PWM — motor dead zone threshold
-        self.declare_parameter('angular_deadband', 0.05)     # rad/s — filter only jitter, allow real turn commands through
-        self.declare_parameter('pwm_ramp_rate', 50)          # Max PWM change per cmd_vel cycle (near-instant; Arduino PID handles smooth accel)
+        self.declare_parameter('min_pwm', 40)               # Raised from 25: heavy 2.4kg robot needs more PWM to overcome stiction
+        self.declare_parameter('angular_deadband', 0.02)    # rad/s — lowered to let small turn commands through (was 0.05)
+        self.declare_parameter('linear_deadband', 0.005)    # m/s — very small to catch near-zero linear commands
+        self.declare_parameter('pwm_ramp_rate', 40)         # Max PWM change per cmd_vel cycle — slightly slower ramp for stability
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('publish_tf', False)        # EKF publishes odom->base_link TF
-        self.declare_parameter('publish_rate', 20.0)       # Hz
+        self.declare_parameter('publish_tf', False)         # EKF publishes odom->base_link TF
+        self.declare_parameter('publish_rate', 20.0)        # Hz
         self.declare_parameter('imu_frame', 'imu_link')
 
+        # --- NEW: Rotation boost parameters ---
+        self.declare_parameter('rotation_boost_factor', 1.35)
+        # [TUNING] Multiplier for PWM during pure in-place rotation (no linear velocity).
+        # Heavy robots need extra torque to overcome friction when spinning in place.
+        # Range: 1.0 (no boost) to 2.0 (double PWM). Start at 1.35 for 2.4kg robot.
+        # If robot doesn't rotate at all on sharp turns → increase toward 1.8
+        # If robot over-rotates/spins too much → decrease toward 1.0
+
+        self.declare_parameter('rotation_min_pwm', 55)
+        # [TUNING] Minimum PWM specifically for in-place rotation commands.
+        # This is higher than the general min_pwm because starting rotation from
+        # standstill on a heavy robot requires more torque than maintaining linear motion.
+        # Range: 40 to 100. Must be >= min_pwm. Must be <= 120 or robot may jerk violently.
+        # If robot doesn't start rotating → increase (try 65, 75)
+        # If robot jerks when starting rotation → decrease toward 45
+
+        # --- NEW: Anti-spin protection ---
+        self.declare_parameter('max_continuous_rotation_deg', 270.0)
+        # [TUNING] Maximum degrees of continuous rotation before clamping angular velocity.
+        # Prevents 360° runaway spins. Accumulates rotation from angular velocity feedback.
+        # Range: 90.0 to 540.0.
+        # If robot needs to do U-turns (180°), keep this >= 200.
+        # If robot spins out of control frequently → decrease to 180.
+        # If robot can't complete needed turns → increase to 360.
+
+        self.declare_parameter('anti_spin_angular_clamp', 0.3)
+        # [TUNING] When anti-spin triggers, clamp angular velocity to this value (rad/s).
+        # Range: 0.0 to 0.5. Set to 0.0 to fully stop rotation when limit hit.
+        # Higher values allow gentle turns even after anti-spin triggers.
+
+        # --- NEW: Goal approach floor ---
+        self.declare_parameter('approach_min_linear_speed', 0.04)
+        # [TUNING] Minimum linear velocity (m/s) when the robot is moving forward.
+        # Prevents Nav2's approach scaling from commanding speeds below motor dead zone.
+        # Range: 0.02 to 0.10. Must produce PWM >= min_pwm after rescaling.
+        # If robot stalls near goal → increase (try 0.06, 0.08)
+        # If robot overshoots goal → decrease toward 0.03
+
+        self.declare_parameter('use_pwm_rescaling', True)
+        # [TUNING] Enable/disable PWM rescaling.
+        # When True: maps [0..255] → [min_pwm..255], so every non-zero command moves the motor.
+        # When False: uses raw PWM with min_pwm clamping (original behavior).
+        # Rescaling is better for smooth speed control; clamping is simpler to debug.
+
+        # Load all parameters
         self.serial_port = self.get_parameter('serial_port').value
         self.baud_rate = self.get_parameter('baud_rate').value
         self.wheel_sep = self.get_parameter('wheel_separation').value
@@ -69,12 +123,20 @@ class DiffDriveNode(Node):
         self.max_motor_speed = self.get_parameter('max_motor_speed').value
         self.min_pwm = self.get_parameter('min_pwm').value
         self.angular_deadband = self.get_parameter('angular_deadband').value
+        self.linear_deadband = self.get_parameter('linear_deadband').value
         self.pwm_ramp_rate = self.get_parameter('pwm_ramp_rate').value
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.publish_tf = self.get_parameter('publish_tf').value
         self.publish_rate = self.get_parameter('publish_rate').value
         self.imu_frame = self.get_parameter('imu_frame').value
+
+        self.rotation_boost_factor = self.get_parameter('rotation_boost_factor').value
+        self.rotation_min_pwm = self.get_parameter('rotation_min_pwm').value
+        self.max_continuous_rotation_rad = math.radians(self.get_parameter('max_continuous_rotation_deg').value)
+        self.anti_spin_angular_clamp = self.get_parameter('anti_spin_angular_clamp').value
+        self.approach_min_linear_speed = self.get_parameter('approach_min_linear_speed').value
+        self.use_pwm_rescaling = self.get_parameter('use_pwm_rescaling').value
 
         # Derived constants
         self.meters_per_tick = (2.0 * math.pi * self.wheel_rad) / self.ticks_per_rev
@@ -95,6 +157,11 @@ class DiffDriveNode(Node):
         # Wheel positions for joint_states (radians)
         self.left_wheel_pos = 0.0
         self.right_wheel_pos = 0.0
+
+        # ========================== ANTI-SPIN STATE ==========================
+        self.accumulated_rotation = 0.0      # radians accumulated in same direction
+        self.last_angular_sign = 0           # +1, -1, or 0
+        self.anti_spin_active = False
 
         # ========================== SERIAL CONNECTION ==========================
         self.ser = None
@@ -140,8 +207,14 @@ class DiffDriveNode(Node):
         )
         self.get_logger().info(
             f'Motor params: max_speed={self.max_motor_speed} m/s, '
-            f'min_pwm={self.min_pwm}, ramp_rate={self.pwm_ramp_rate}, '
-            f'pwm_per_mps={self.pwm_per_mps:.1f}'
+            f'min_pwm={self.min_pwm}, rotation_min_pwm={self.rotation_min_pwm}, '
+            f'ramp_rate={self.pwm_ramp_rate}, pwm_per_mps={self.pwm_per_mps:.1f}'
+        )
+        self.get_logger().info(
+            f'Rotation: boost={self.rotation_boost_factor}, '
+            f'anti_spin_limit={math.degrees(self.max_continuous_rotation_rad):.0f}deg, '
+            f'approach_min={self.approach_min_linear_speed} m/s, '
+            f'rescaling={"ON" if self.use_pwm_rescaling else "OFF"}'
         )
 
     def connect_serial(self):
@@ -164,11 +237,15 @@ class DiffDriveNode(Node):
     def cmd_vel_callback(self, msg: Twist):
         """Convert cmd_vel to motor PWM commands.
 
-        Pipeline:
-        1. Deadband: Filter jitter (< 0.05 rad/s angular, < 0.01 m/s linear)
-        2. Inverse kinematics: cmd_vel → per-wheel velocities → raw PWM
-        3. Ramp: Limit PWM change per cycle for smooth acceleration
-        4. Arduino PID handles dead-zone compensation and speed tracking
+        Pipeline (Branch final-1 — Enhanced PID + Adaptive Deadband):
+        1. Deadband: Filter jitter with separate angular/linear thresholds
+        2. Anti-spin: Track accumulated rotation, clamp if excessive
+        3. Approach floor: Enforce minimum linear speed when moving
+        4. Inverse kinematics: cmd_vel → per-wheel velocities → raw PWM
+        5. Rotation boost: Extra PWM for pure in-place turns
+        6. PWM rescaling: Map to usable range above motor dead zone
+        7. Ramp: Limit PWM change per cycle for smooth acceleration
+        8. Arduino PID handles final speed tracking
         """
         self.last_cmd_time = self.get_clock().now()
 
@@ -178,8 +255,47 @@ class DiffDriveNode(Node):
         # --- Layer 1: Deadband ---
         if abs(w) < self.angular_deadband:
             w = 0.0
-        if abs(v) < 0.01:
+        if abs(v) < self.linear_deadband:
             v = 0.0
+
+        # --- Layer 2: Anti-spin protection ---
+        # Track accumulated rotation in the same direction. Reset when direction changes.
+        if w != 0.0:
+            current_sign = 1 if w > 0 else -1
+            if current_sign == self.last_angular_sign:
+                # Same direction: accumulate (dt ~= 1/20Hz = 0.05s)
+                self.accumulated_rotation += abs(w) * (1.0 / self.publish_rate)
+            else:
+                # Direction changed: reset accumulator
+                self.accumulated_rotation = 0.0
+            self.last_angular_sign = current_sign
+
+            # Clamp if accumulated too much rotation
+            if self.accumulated_rotation > self.max_continuous_rotation_rad:
+                if not self.anti_spin_active:
+                    self.get_logger().warn(
+                        f'Anti-spin triggered: {math.degrees(self.accumulated_rotation):.0f}° accumulated, '
+                        f'clamping w to ±{self.anti_spin_angular_clamp}'
+                    )
+                    self.anti_spin_active = True
+                w_sign = 1.0 if w > 0 else -1.0
+                w = w_sign * min(abs(w), self.anti_spin_angular_clamp)
+        else:
+            # No angular command: reset accumulator
+            self.accumulated_rotation = 0.0
+            self.last_angular_sign = 0
+            if self.anti_spin_active:
+                self.get_logger().info('Anti-spin reset')
+                self.anti_spin_active = False
+
+        # --- Layer 3: Approach speed floor ---
+        # If Nav2 commands a very slow linear speed, enforce a minimum so the
+        # robot doesn't stall near the goal. Only when actually trying to move forward.
+        if v != 0.0 and abs(v) < self.approach_min_linear_speed:
+            v = math.copysign(self.approach_min_linear_speed, v)
+
+        # Detect pure rotation: significant angular, negligible linear
+        is_pure_rotation = (abs(w) > self.angular_deadband and abs(v) < self.linear_deadband)
 
         # Inverse kinematics: compute wheel velocities
         v_left = v - (w * self.wheel_sep / 2.0)
@@ -189,11 +305,26 @@ class DiffDriveNode(Node):
         left_pwm = int(v_left * self.pwm_per_mps)
         right_pwm = int(v_right * self.pwm_per_mps)
 
+        # --- Layer 4: Rotation boost for pure in-place turns ---
+        if is_pure_rotation:
+            left_pwm = int(left_pwm * self.rotation_boost_factor)
+            right_pwm = int(right_pwm * self.rotation_boost_factor)
+
         # Clamp to valid range
         left_pwm = max(-255, min(255, left_pwm))
         right_pwm = max(-255, min(255, right_pwm))
 
-        # --- Smooth ramp ---
+        # --- Layer 5: PWM rescaling or min-PWM clamping ---
+        if self.use_pwm_rescaling:
+            effective_min = self.rotation_min_pwm if is_pure_rotation else self.min_pwm
+            left_pwm = self._rescale_pwm(left_pwm, effective_min)
+            right_pwm = self._rescale_pwm(right_pwm, effective_min)
+        else:
+            effective_min = self.rotation_min_pwm if is_pure_rotation else self.min_pwm
+            left_pwm = self._apply_min_pwm(left_pwm, effective_min)
+            right_pwm = self._apply_min_pwm(right_pwm, effective_min)
+
+        # --- Layer 6: Smooth ramp ---
         left_pwm = self._ramp_pwm(left_pwm, self.last_left_pwm)
         right_pwm = self._ramp_pwm(right_pwm, self.last_right_pwm)
 
@@ -212,34 +343,33 @@ class DiffDriveNode(Node):
                     f'PWM L={left_pwm} R={right_pwm}'
                 )
 
-    def _apply_min_pwm(self, pwm):
-        """Clamp non-zero PWM to at least ±min_pwm.
+    def _apply_min_pwm(self, pwm, effective_min=None):
+        """Clamp non-zero PWM to at least ±effective_min.
 
         This ensures the Arduino PID always gets a target above the motor's
-        dead-zone. Unlike rescaling (which inflated ALL values proportionally),
-        this only affects very low PWM values — higher values pass through unchanged.
+        dead-zone. effective_min defaults to self.min_pwm if not specified.
         """
         if pwm == 0:
             return 0
+        if effective_min is None:
+            effective_min = self.min_pwm
         sign = 1 if pwm > 0 else -1
-        return sign * max(abs(pwm), self.min_pwm)
+        return sign * max(abs(pwm), effective_min)
 
-    def _rescale_pwm(self, pwm):
-        """Map [1..255] → [min_pwm..255] so any command moves the motor.
+    def _rescale_pwm(self, pwm, effective_min=None):
+        """Map [1..255] → [effective_min..255] so any command moves the motor.
 
-        This eliminates the dead zone where PWM < 35 produces no motion.
-        The mapping is linear and preserves proportionality:
-          raw   0 →   0  (stopped)
-          raw   1 →  35  (minimum working PWM)
-          raw  49 →  77  (typical turn speed)
-          raw 128 → 145  (medium speed)
-          raw 255 → 255  (full speed)
+        This eliminates the dead zone where PWM < min produces no motion.
+        The mapping is linear and preserves proportionality.
+        effective_min defaults to self.min_pwm if not specified.
         """
         if pwm == 0:
             return 0
+        if effective_min is None:
+            effective_min = self.min_pwm
         sign = 1 if pwm > 0 else -1
         abs_pwm = abs(pwm)
-        scaled = self.min_pwm + (abs_pwm - 1) * (255 - self.min_pwm) / 254.0
+        scaled = effective_min + (abs_pwm - 1) * (255 - effective_min) / 254.0
         return sign * int(round(scaled))
 
     def _ramp_pwm(self, target, current):

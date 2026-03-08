@@ -104,30 +104,30 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25         # [TUNING] Relaxed to 25cm — stops sooner near goal, prevents overshoot
-      yaw_goal_tolerance: 1.0        # [TUNING] ~46° — very generous heading prevents spin-at-goal oscillation
+      xy_goal_tolerance: 0.20         # [TUNING] 20cm — tighter than before but still forgiving for heavy robot
+      yaw_goal_tolerance: 0.785       # [TUNING] ~45° — generous heading prevents spin-at-goal oscillation
 
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.20        # [SPEED] Forward speed (m/s)
-      lookahead_dist: 0.4
-      min_lookahead_dist: 0.25
-      max_lookahead_dist: 0.8
-      lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.8   # [SPEED][TURNING] PWM ~47/wheel — 91% accurate at this speed
-      rotate_to_heading_min_angle: 0.7     # [TURNING] ~23° — in-place turn for moderate heading errors
+      desired_linear_vel: 0.18        # [SPEED] Forward speed (m/s) — slightly reduced for precision
+      lookahead_dist: 0.45
+      min_lookahead_dist: 0.3         # Raised: longer lookahead = smoother curves, fewer sharp corrections
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.8
+      rotate_to_heading_angular_vel: 0.6   # [SPEED][TURNING] Reduced for controlled rotation — prevents overrotation
+      rotate_to_heading_min_angle: 0.5     # [TURNING] ~29° — trigger in-place turn for moderate heading errors
       transform_tolerance: 0.2
-      use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.02   # [SPEED] Very slow creep near goal
-      approach_velocity_scaling_dist: 0.8  # [SPEED] Start slowing 0.8m from goal
+      use_velocity_scaled_lookahead_dist: true   # Scale lookahead with speed for smoother curves
+      min_approach_linear_velocity: 0.04   # [SPEED] Raised from 0.02 — must produce PWM above dead zone
+      approach_velocity_scaling_dist: 0.6  # [SPEED] Start slowing 0.6m from goal (was 0.8 — less creep time)
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 1.0
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.05
+      regulated_linear_scaling_min_speed: 0.06  # Raised: ensures min speed stays above motor dead zone
       allow_reversing: false
-      max_angular_accel: 0.8               # [SPEED][TURNING] Responsive — PWM ramp in diff_drive handles smoothing
+      max_angular_accel: 0.6               # [SPEED][TURNING] Reduced from 0.8 — gentler angular acceleration
       max_robot_pose_search_dist: 10.0
 
 planner_server:
@@ -176,9 +176,9 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.8            # [SPEED] Recovery spin speed — matches RPP rotate_to_heading
-    min_rotational_vel: 0.4            # [SPEED] Min angular — motors unreliable below ~0.42 rad/s (PWM dead-zone)
-    rotational_acc_lim: 1.0            # [SPEED] Angular acceleration for recovery behaviors
+    max_rotational_vel: 0.6            # [SPEED] Recovery spin speed — matches RPP rotate_to_heading (reduced)
+    min_rotational_vel: 0.3            # [SPEED] Min angular — lowered to allow gentler recovery rotations
+    rotational_acc_lim: 0.8            # [SPEED] Angular acceleration for recovery behaviors (gentler)
 
 waypoint_follower:
   ros__parameters:
@@ -198,13 +198,13 @@ velocity_smoother:
     smoothing_frequency: 10.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.2, 0.0, 0.8]     # [SPEED] Max linear 0.2 m/s, angular 0.8 rad/s
-    min_velocity: [-0.20, 0.0, -0.8]   # [SPEED] Reverse limits
-    max_accel: [0.6, 0.0, 1.0]         # [SPEED] Responsive — PWM ramping in diff_drive handles smoothing
-    max_decel: [-0.8, 0.0, -1.2]       # [SPEED] Responsive deceleration
+    max_velocity: [0.18, 0.0, 0.6]    # [SPEED] Max linear 0.18 m/s, angular 0.6 rad/s (reduced for control)
+    min_velocity: [-0.18, 0.0, -0.6]  # [SPEED] Reverse limits
+    max_accel: [0.5, 0.0, 0.8]        # [SPEED] Gentler acceleration for heavy robot
+    max_decel: [-0.6, 0.0, -1.0]      # [SPEED] Gentler deceleration
     odom_topic: "odom"
     odom_duration: 0.1
-    deadband_velocity: [0.01, 0.0, 0.05] # [SMOOTH] Filter tiny linear/angular vibrations
+    deadband_velocity: [0.005, 0.0, 0.02] # [SMOOTH] Tighter deadband to pass small commands through
     velocity_timeout: 1.0
 
 local_costmap:

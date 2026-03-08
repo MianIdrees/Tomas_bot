@@ -206,7 +206,9 @@ static void bno_enableReport(uint8_t reportId, uint32_t interval_us) {
 #define RIGHT_MAX_TICKS         48    // Measured: right motor ticks at raw PWM 255 per 50ms
 
 // Minimum PWM to overcome motor stiction and L298N voltage drop
-#define MIN_PWM  25
+// MUST MATCH diff_drive_node.py min_pwm parameter (default: 40)
+// Heavy 2.4kg robot requires higher min PWM to start moving
+#define MIN_PWM  40
 
 // PID gains — start conservative, tune on real hardware
 #define KP   1.0
